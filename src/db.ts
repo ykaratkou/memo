@@ -240,6 +240,16 @@ export function listMemories(
   const db = getDb();
 
   if (containerTag) {
+    if (limit < 0) {
+      return db
+        .query(
+          `SELECT id, content, tags, type, created_at, updated_at,
+                  display_name, project_name, git_repo_url
+           FROM memories WHERE container_tag = ?
+           ORDER BY created_at DESC`,
+        )
+        .all(containerTag) as any[];
+    }
     return db
       .query(
         `SELECT id, content, tags, type, created_at, updated_at,
@@ -248,6 +258,16 @@ export function listMemories(
          ORDER BY created_at DESC LIMIT ?`,
       )
       .all(containerTag, limit) as any[];
+  }
+
+  if (limit < 0) {
+    return db
+      .query(
+        `SELECT id, content, tags, type, created_at, updated_at,
+                display_name, project_name, git_repo_url
+         FROM memories ORDER BY created_at DESC`,
+      )
+      .all() as any[];
   }
 
   return db

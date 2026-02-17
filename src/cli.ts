@@ -9,19 +9,24 @@ import { stripPrivateContent, isFullyPrivate } from "./privacy.ts";
 import { getTags } from "./tags.ts";
 import { CONFIG } from "./config.ts";
 import { log } from "./log.ts";
+import { existsSync, symlinkSync, readlinkSync, mkdirSync, readdirSync } from "node:fs";
+import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 
 const USAGE = `memo - persistent memory for LLM agent sessions
 
 Commands:
   memo add <text> [--tags t1,t2]    Store a memory (scoped to current project)
   memo search <query> [--limit N]   Semantic search (default top ${CONFIG.maxMemories})
-  memo list [--limit N]             List recent memories
+  memo list [--limit N] [--all]     List recent memories (--all for no limit)
   memo forget <id>                  Delete a memory by ID
   memo tags                         Show detected project/user info
   memo status                       Show system status
+  memo install skills <target>      Install agent skills (--opencode, --claude, --codex)
 
 Flags:
   --global                          Operate across all projects
+  --all                             List all memories (no limit)
   --help, -h                        Show this help
 `;
 
@@ -31,6 +36,10 @@ function parseArgs(argv: string[]): {
   tags?: string[];
   limit: number;
   global: boolean;
+  all: boolean;
+  opencode: boolean;
+  claude: boolean;
+  codex: boolean;
 } {
   const args = argv.slice(2);
   let command = "";
@@ -38,6 +47,10 @@ function parseArgs(argv: string[]): {
   let tags: string[] | undefined;
   let limit = CONFIG.maxMemories;
   let global = false;
+  let all = false;
+  let opencode = false;
+  let claude = false;
+  let codex = false;
 
   let i = 0;
   while (i < args.length) {
@@ -45,6 +58,26 @@ function parseArgs(argv: string[]): {
 
     if (arg === "--global") {
       global = true;
+      i++;
+      continue;
+    }
+    if (arg === "--all") {
+      all = true;
+      i++;
+      continue;
+    }
+    if (arg === "--opencode") {
+      opencode = true;
+      i++;
+      continue;
+    }
+    if (arg === "--claude") {
+      claude = true;
+      i++;
+      continue;
+    }
+    if (arg === "--codex") {
+      codex = true;
       i++;
       continue;
     }
@@ -78,6 +111,10 @@ function parseArgs(argv: string[]): {
     tags,
     limit,
     global,
+    all,
+    opencode,
+    claude,
+    codex,
   };
 }
 
@@ -167,12 +204,12 @@ async function cmdSearch(query: string, limit: number, global: boolean): Promise
   }
 }
 
-function cmdList(limit: number, global: boolean): void {
+function cmdList(limit: number, global: boolean, all: boolean): void {
   const cwd = process.cwd();
   const tagInfo = getTags(cwd);
   const containerTag = global ? null : tagInfo.project.tag;
 
-  const rows = listMemories(containerTag, limit);
+  const rows = listMemories(containerTag, all ? -1 : limit);
 
   if (rows.length === 0) {
     console.log("No memories stored yet.");
@@ -237,8 +274,98 @@ function cmdStatus(): void {
   console.log(`  Deduplication:    ${CONFIG.deduplicationEnabled ? "on" : "off"} (threshold: ${CONFIG.deduplicationSimilarityThreshold})`);
 }
 
+const INSTALL_USAGE = `Usage: memo install skills --opencode | --claude | --codex
+
+Symlinks memo agent skills into the target tool's skills directory.
+
+Targets:
+  --opencode    ~/.config/opencode/skills/
+  --claude      ~/.claude/skills/
+  --codex       ~/.agents/skills/
+`;
+
+function cmdInstall(
+  subcommand: string,
+  flags: { opencode: boolean; claude: boolean; codex: boolean },
+): void {
+  if (subcommand !== "skills") {
+    console.error(INSTALL_USAGE);
+    process.exit(1);
+  }
+
+  const targets: { name: string; dir: string }[] = [];
+  const home = homedir();
+
+  if (flags.opencode) targets.push({ name: "OpenCode", dir: join(home, ".config", "opencode", "skills") });
+  if (flags.claude) targets.push({ name: "Claude Code", dir: join(home, ".claude", "skills") });
+  if (flags.codex) targets.push({ name: "Codex", dir: join(home, ".agents", "skills") });
+
+  if (targets.length === 0) {
+    console.error("Error: specify at least one target: --opencode, --claude, or --codex\n");
+    console.error(INSTALL_USAGE);
+    process.exit(1);
+  }
+
+  // Resolve skills source directory relative to this file
+  const skillsSrc = resolve(import.meta.dir, "..", "skills");
+  if (!existsSync(skillsSrc)) {
+    console.error(`Error: skills directory not found at ${skillsSrc}`);
+    process.exit(1);
+  }
+
+  const skillNames = readdirSync(skillsSrc).filter((name) => {
+    const fullPath = join(skillsSrc, name);
+    try {
+      return Bun.file(join(fullPath, "SKILL.md")).size > 0;
+    } catch {
+      return false;
+    }
+  });
+
+  if (skillNames.length === 0) {
+    console.error("Error: no skills found in source directory.");
+    process.exit(1);
+  }
+
+  for (const target of targets) {
+    console.log(`\n${target.name} (${target.dir}):`);
+    mkdirSync(target.dir, { recursive: true });
+
+    for (const skill of skillNames) {
+      const src = join(skillsSrc, skill);
+      const dest = join(target.dir, skill);
+
+      if (existsSync(dest)) {
+        // Check if it's already a symlink pointing to the right place
+        try {
+          const existing = readlinkSync(dest);
+          if (resolve(existing) === resolve(src)) {
+            console.log(`  ${skill} - already linked`);
+            continue;
+          }
+          console.log(`  ${skill} - skipped (already exists, points to ${existing})`);
+        } catch {
+          console.log(`  ${skill} - skipped (already exists as directory/file)`);
+        }
+        continue;
+      }
+
+      symlinkSync(src, dest, "dir");
+      console.log(`  ${skill} - linked`);
+    }
+  }
+
+  console.log("\nDone.");
+}
+
 async function main(): Promise<void> {
-  const { command, text, tags, limit, global } = parseArgs(process.argv);
+  const { command, text, tags, limit, global, all, opencode, claude, codex } = parseArgs(process.argv);
+
+  // install command doesn't need DB
+  if (command === "install") {
+    cmdInstall(text, { opencode, claude, codex });
+    return;
+  }
 
   try {
     switch (command) {
@@ -249,7 +376,7 @@ async function main(): Promise<void> {
         await cmdSearch(text, limit, global);
         break;
       case "list":
-        cmdList(limit, global);
+        cmdList(limit, global, all);
         break;
       case "forget":
         cmdForget(text);

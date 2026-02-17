@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execSync } from "node:child_process";
-import { normalize, sep } from "node:path";
+import { normalize, resolve, sep } from "node:path";
 
 function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 16);
@@ -27,6 +27,23 @@ function getGitEmail(): string | null {
 function getGitName(): string | null {
   try {
     return execSync("git config user.name", { encoding: "utf-8" }).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Returns the absolute path to the shared .git directory.
+ * For worktrees of the same repo this returns the same path,
+ * making it a stable project identity across worktrees.
+ */
+function getGitCommonDir(directory: string): string | null {
+  try {
+    const result = execSync(
+      "git rev-parse --path-format=absolute --git-common-dir",
+      { encoding: "utf-8", cwd: directory, stdio: ["pipe", "pipe", "pipe"] },
+    ).trim();
+    return result || null;
   } catch {
     return null;
   }
@@ -74,11 +91,22 @@ export function getUserTagInfo(): TagInfo {
 }
 
 export function getProjectTagInfo(directory: string): TagInfo {
-  const projectName = getProjectName(directory);
   const gitRepoUrl = getGitRepoUrl(directory);
 
+  // Use git common dir as a stable identity across worktrees.
+  // For all worktrees of the same repo, this resolves to the same
+  // absolute path (e.g. /path/to/repo/.git), producing the same tag.
+  const gitCommonDir = getGitCommonDir(directory);
+  const tagSource = gitCommonDir || directory;
+
+  // Derive project name from git root (parent of .git dir) when available,
+  // so worktrees share the same display name as the main checkout.
+  const projectName = gitCommonDir
+    ? getProjectName(resolve(gitCommonDir, ".."))
+    : getProjectName(directory);
+
   return {
-    tag: `memo_project_${sha256(directory)}`,
+    tag: `memo_project_${sha256(tagSource)}`,
     displayName: projectName,
     projectPath: directory,
     projectName,

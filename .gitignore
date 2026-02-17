@@ -33,8 +33,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 
-# SQLite database
+# Old local db (removed, now stored in ~/.config/memo/)
 memo.db*
 
-# Model cache
+# Old model cache (removed, now stored in ~/.config/memo/data/.cache/)
 .models

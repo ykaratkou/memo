@@ -90,12 +90,11 @@ export class EmbeddingService {
     return withTimeout(this.embed(text), TIMEOUT_MS);
   }
 
-  async embedForSearch(text: string): Promise<Float32Array> {
-    return this.embedWithTimeout(`search_query: ${text}`);
-  }
-
-  async embedForStorage(text: string): Promise<Float32Array> {
-    return this.embedWithTimeout(`search_document: ${text}`);
+  async embedText(text: string): Promise<Float32Array> {
+    // Use clustering: prefix for symmetric embeddings
+    // This ensures identical text produces identical vectors
+    // (unlike search_query:/search_document: which are asymmetric)
+    return this.embedWithTimeout(`clustering: ${text}`);
   }
 
   clearCache(): void {

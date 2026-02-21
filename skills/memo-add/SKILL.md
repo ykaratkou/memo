@@ -50,12 +50,6 @@ Store the memory using:
 memo add "<memory text>"
 ```
 
-If the user specified tags, include them:
-
-```bash
-memo add "<memory text>" --tags tag1,tag2
-```
-
 ### Step 4: Confirm
 
 After adding, confirm to the user what was stored. If multiple memories were added, list them all.

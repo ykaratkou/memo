@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import * as sqliteVec from "sqlite-vec";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { CONFIG } from "./config.ts";
 import { log } from "./log.ts";
@@ -119,10 +119,14 @@ function initSchema(db: Database): void {
     )
   `);
 
+  // FTS5 table for BM25 keyword search
+  // UNINDEXED columns store data without indexing (metadata only)
   db.run(`
-    CREATE VIRTUAL TABLE IF NOT EXISTS vec_tags USING vec0(
-      memory_id TEXT PRIMARY KEY,
-      embedding float32[${CONFIG.embeddingDimensions}] distance_metric=cosine
+    CREATE VIRTUAL TABLE IF NOT EXISTS fts_memories USING fts5(
+      content,
+      memory_id UNINDEXED,
+      container_tag UNINDEXED,
+      tokenize='unicode61'
     )
   `);
 }
@@ -160,9 +164,7 @@ export interface MemoryRecord {
   id: string;
   content: string;
   vector: Float32Array;
-  tagsVector?: Float32Array;
   containerTag: string;
-  tags?: string;
   type?: string;
   createdAt: number;
   updatedAt: number;
@@ -179,19 +181,19 @@ export function insertMemory(record: MemoryRecord): void {
   const db = getDb();
   const vectorBuffer = new Uint8Array(record.vector.buffer);
 
+  // Insert into main memories table
   db.run(
     `INSERT INTO memories (
-      id, content, vector, container_tag, tags, type,
+      id, content, vector, container_tag, type,
       created_at, updated_at, metadata,
       display_name, user_name, user_email,
       project_path, project_name, git_repo_url
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       record.id,
       record.content,
       vectorBuffer,
       record.containerTag,
-      record.tags || null,
       record.type || null,
       record.createdAt,
       record.updatedAt,
@@ -205,18 +207,17 @@ export function insertMemory(record: MemoryRecord): void {
     ],
   );
 
+  // Insert into vector search table
   db.run(`INSERT INTO vec_memories (memory_id, embedding) VALUES (?, ?)`, [
     record.id,
     vectorBuffer,
   ]);
 
-  if (record.tagsVector) {
-    const tagsBuffer = new Uint8Array(record.tagsVector.buffer);
-    db.run(`INSERT INTO vec_tags (memory_id, embedding) VALUES (?, ?)`, [
-      record.id,
-      tagsBuffer,
-    ]);
-  }
+  // Insert into FTS5 table for BM25 keyword search
+  db.run(
+    `INSERT INTO fts_memories (content, memory_id, container_tag) VALUES (?, ?, ?)`,
+    [record.content, record.id, record.containerTag],
+  );
 }
 
 export function deleteMemory(memoryId: string): boolean {
@@ -228,7 +229,7 @@ export function deleteMemory(memoryId: string): boolean {
   if (!existing) return false;
 
   db.run("DELETE FROM vec_memories WHERE memory_id = ?", [memoryId]);
-  db.run("DELETE FROM vec_tags WHERE memory_id = ?", [memoryId]);
+  db.run("DELETE FROM fts_memories WHERE memory_id = ?", [memoryId]);
   db.run("DELETE FROM memories WHERE id = ?", [memoryId]);
   return true;
 }
@@ -243,7 +244,7 @@ export function listMemories(
     if (limit < 0) {
       return db
         .query(
-          `SELECT id, content, tags, type, created_at, updated_at,
+          `SELECT id, content, type, created_at, updated_at,
                   display_name, project_name, git_repo_url
            FROM memories WHERE container_tag = ?
            ORDER BY created_at DESC`,
@@ -252,7 +253,7 @@ export function listMemories(
     }
     return db
       .query(
-        `SELECT id, content, tags, type, created_at, updated_at,
+        `SELECT id, content, type, created_at, updated_at,
                 display_name, project_name, git_repo_url
          FROM memories WHERE container_tag = ?
          ORDER BY created_at DESC LIMIT ?`,
@@ -263,7 +264,7 @@ export function listMemories(
   if (limit < 0) {
     return db
       .query(
-        `SELECT id, content, tags, type, created_at, updated_at,
+        `SELECT id, content, type, created_at, updated_at,
                 display_name, project_name, git_repo_url
          FROM memories ORDER BY created_at DESC`,
       )
@@ -272,7 +273,7 @@ export function listMemories(
 
   return db
     .query(
-      `SELECT id, content, tags, type, created_at, updated_at,
+      `SELECT id, content, type, created_at, updated_at,
               display_name, project_name, git_repo_url
        FROM memories ORDER BY created_at DESC LIMIT ?`,
     )
@@ -306,4 +307,17 @@ export function findExactDuplicate(
     )
     .get(content, containerTag) as any;
   return row ? row.id : null;
+}
+
+export function resetDb(): void {
+  closeDb();
+  try {
+    unlinkSync(DB_PATH);
+    log("Database reset", { path: DB_PATH });
+  } catch (error) {
+    // File might not exist, that's fine
+    if ((error as any).code !== "ENOENT") {
+      throw error;
+    }
+  }
 }

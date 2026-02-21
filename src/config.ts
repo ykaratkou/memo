@@ -19,6 +19,7 @@ interface MemoConfig {
   embeddingModel?: string;
   embeddingDimensions?: number;
   similarityThreshold?: number;
+  minVectorSimilarity?: number;
   maxMemories?: number;
   deduplicationEnabled?: boolean;
   deduplicationSimilarityThreshold?: number;
@@ -28,7 +29,8 @@ const DEFAULTS = {
   storagePath: join(CONFIG_DIR, "data"),
   embeddingModel: "Xenova/nomic-embed-text-v1",
   embeddingDimensions: 768,
-  similarityThreshold: 0.3,
+  similarityThreshold: 0.5,
+  minVectorSimilarity: 0.6,
   maxMemories: 10,
   deduplicationEnabled: true,
   deduplicationSimilarityThreshold: 0.9,
@@ -103,8 +105,12 @@ const CONFIG_TEMPLATE = `{
   // ============================================
   // Search Settings
   // ============================================
-  // Minimum similarity score (0-1) for search results
-  // "similarityThreshold": 0.3,
+  // Minimum final score (0-1) to include a result
+  // "similarityThreshold": 0.5,
+
+  // Minimum cosine similarity for vector results to enter hybrid scoring
+  // Prevents unrelated memories from appearing via KNN alone
+  // "minVectorSimilarity": 0.6,
 
   // Maximum number of results to return
   // "maxMemories": 10,
@@ -142,6 +148,8 @@ export const CONFIG = {
     fileConfig.embeddingDimensions ?? getEmbeddingDimensions(embeddingModel),
   similarityThreshold:
     fileConfig.similarityThreshold ?? DEFAULTS.similarityThreshold,
+  minVectorSimilarity:
+    fileConfig.minVectorSimilarity ?? DEFAULTS.minVectorSimilarity,
   maxMemories: fileConfig.maxMemories ?? DEFAULTS.maxMemories,
   deduplicationEnabled:
     fileConfig.deduplicationEnabled ?? DEFAULTS.deduplicationEnabled,

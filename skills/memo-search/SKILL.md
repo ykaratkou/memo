@@ -1,11 +1,11 @@
 ---
 name: memo-search
-description: Search the current project's memo database for relevant memories. Use it before processing any question from user
+description: Search the current project's memo database using hybrid semantic + keyword search. Use it before processing any question from user
 ---
 
 # Memo Search
 
-Search the current project's memo database for relevant memories.
+Search the current project's memo database using hybrid semantic + keyword search (BM25 + vector similarity with RRF scoring).
 
 ## Workflow
 
@@ -15,11 +15,16 @@ Extract the key topic or question from the user's request. If the request is bro
 
 ### Step 2: Search
 
-Run a semantic search:
+Run a hybrid search:
 
 ```bash
 memo search "<query>" --limit 10
 ```
+
+The search combines:
+- **Vector similarity** — finds conceptually related memories (synonyms, related concepts)
+- **BM25 keyword search** — finds exact word matches via full-text search
+- **RRF scoring** — combines both without requiring exact keywords
 
 Adjust `--limit` based on how broad the search is. Use a higher limit for broad topics, lower for specific lookups.
 
@@ -47,6 +52,7 @@ This returns all memories without semantic ranking. Use it for browsing rather t
 
 ## Important Notes
 
-- **Semantic search is fuzzy.** Results are ranked by relevance, not exact match. A query for "database" will also surface memories about "PostgreSQL" or "schema".
+- **Hybrid search finds both semantic and keyword matches.** A query for "database" will find memories about "PostgreSQL" (semantic) AND memories containing the word "database" (keyword). Exact keyword matches typically score higher (closer to 1.0).
+- **Scores are 0-1 scale.** 1.0 = exact match in both vector and keyword search. Lower scores still indicate relevance through semantic similarity.
 - **No results doesn't mean no information.** The user may simply not have stored that information yet — suggest adding it.
 - **Be proactive but not noisy.** When using search to inform a task, integrate the knowledge quietly. Only call out memories explicitly when they're directly relevant to the user's question.

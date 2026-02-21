@@ -9,7 +9,7 @@ Detect and clean up duplicate or redundant memories in the current project's mem
 
 ## When to Use
 
-Run this skill when the knowledge base feels bloated, or periodically to keep it lean. Memo has built-in deduplication at insert time, but it only catches exact matches and very high similarity (>0.9). This skill catches softer duplicates that slip through: paraphrases, subsets, and memories that were added in slightly different wording over time.
+Run this skill when the knowledge base feels bloated, or periodically to keep it lean. Memo has built-in deduplication at insert time, but it only catches exact matches and very high similarity (threshold: 0.9). This skill catches softer duplicates that slip through: paraphrases, subsets, and memories that were added in slightly different wording over time.
 
 ## Workflow
 

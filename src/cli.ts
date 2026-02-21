@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { insertMemory, deleteMemory, listMemories, countMemories, closeDb } from "./db.ts";
+import { insertMemory, deleteMemory, listMemories, countMemories, closeDb, resetDb } from "./db.ts";
 import type { MemoryRecord } from "./db.ts";
 import { searchMemories } from "./search.ts";
 import { embeddingService } from "./embed.ts";
@@ -16,10 +16,11 @@ import { homedir } from "node:os";
 const USAGE = `memo - persistent memory for LLM agent sessions
 
 Commands:
-  memo add <text> [--tags t1,t2]    Store a memory (scoped to current project)
-  memo search <query> [--limit N]   Semantic search (default top ${CONFIG.maxMemories})
+  memo add <text>                   Store a memory (scoped to current project)
+  memo search <query> [--limit N]   Hybrid semantic + keyword search (default top ${CONFIG.maxMemories})
   memo list [--limit N] [--all]     List recent memories (--all for no limit)
   memo forget <id>                  Delete a memory by ID
+  memo reset                        Reset all memories (irreversible)
   memo tags                         Show detected project/user info
   memo status                       Show system status
   memo install skills <target>      Install agent skills (--opencode, --claude, --codex)
@@ -33,7 +34,6 @@ Flags:
 function parseArgs(argv: string[]): {
   command: string;
   text: string;
-  tags?: string[];
   limit: number;
   global: boolean;
   all: boolean;
@@ -44,7 +44,6 @@ function parseArgs(argv: string[]): {
   const args = argv.slice(2);
   let command = "";
   const textParts: string[] = [];
-  let tags: string[] | undefined;
   let limit = CONFIG.maxMemories;
   let global = false;
   let all = false;
@@ -81,11 +80,6 @@ function parseArgs(argv: string[]): {
       i++;
       continue;
     }
-    if (arg === "--tags" && i + 1 < args.length) {
-      tags = args[i + 1]!.split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
-      i += 2;
-      continue;
-    }
     if (arg === "--limit" && i + 1 < args.length) {
       limit = parseInt(args[i + 1]!, 10) || CONFIG.maxMemories;
       i += 2;
@@ -108,7 +102,6 @@ function parseArgs(argv: string[]): {
   return {
     command: command || "help",
     text: textParts.join(" "),
-    tags,
     limit,
     global,
     all,
@@ -118,9 +111,9 @@ function parseArgs(argv: string[]): {
   };
 }
 
-async function cmdAdd(text: string, tags: string[] | undefined, global: boolean): Promise<void> {
+async function cmdAdd(text: string, global: boolean): Promise<void> {
   if (!text) {
-    console.error("Error: no text provided.\n\nUsage: memo add <text> [--tags t1,t2]");
+    console.error("Error: no text provided.\n\nUsage: memo add <text>");
     process.exit(1);
   }
 
@@ -135,8 +128,8 @@ async function cmdAdd(text: string, tags: string[] | undefined, global: boolean)
   const tagInfo = getTags(cwd);
   const containerTag = global ? tagInfo.user.tag : tagInfo.project.tag;
 
-  // Embed the content
-  const vector = await embeddingService.embedForStorage(sanitized);
+  // Embed the content with symmetric clustering prefix
+  const vector = await embeddingService.embedText(sanitized);
 
   // Deduplication check
   const dedup = checkDuplicate(sanitized, vector, containerTag);
@@ -147,12 +140,6 @@ async function cmdAdd(text: string, tags: string[] | undefined, global: boolean)
     return;
   }
 
-  // Embed tags separately for tag-weighted search
-  let tagsVector: Float32Array | undefined;
-  if (tags && tags.length > 0) {
-    tagsVector = await embeddingService.embedWithTimeout(tags.join(", "));
-  }
-
   const id = `mem_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
   const now = Date.now();
 
@@ -160,9 +147,7 @@ async function cmdAdd(text: string, tags: string[] | undefined, global: boolean)
     id,
     content: sanitized,
     vector,
-    tagsVector,
     containerTag,
-    tags: tags?.join(","),
     createdAt: now,
     updatedAt: now,
     displayName: tagInfo.project.displayName,
@@ -174,7 +159,7 @@ async function cmdAdd(text: string, tags: string[] | undefined, global: boolean)
   };
 
   insertMemory(record);
-  log("Memory added", { id, containerTag, tags });
+  log("Memory added", { id, containerTag });
   console.log(`Stored: ${id}`);
 }
 
@@ -188,7 +173,8 @@ async function cmdSearch(query: string, limit: number, global: boolean): Promise
   const tagInfo = getTags(cwd);
   const containerTag = global ? null : tagInfo.project.tag;
 
-  const queryVector = await embeddingService.embedForSearch(query);
+  // Embed query with symmetric clustering prefix (same as storage)
+  const queryVector = await embeddingService.embedText(query);
   const results = searchMemories(queryVector, containerTag, query, limit);
 
   if (results.length === 0) {
@@ -197,9 +183,8 @@ async function cmdSearch(query: string, limit: number, global: boolean): Promise
   }
 
   for (const r of results) {
-    const tagsStr = r.tags.length > 0 ? ` [${r.tags.join(",")}]` : "";
     const date = new Date(r.createdAt).toISOString().split("T")[0];
-    console.log(`[${r.similarity.toFixed(3)}] (${r.id}) ${date}${tagsStr}`);
+    console.log(`[${r.similarity.toFixed(3)}] (${r.id}) ${date}`);
     console.log(`  ${r.content}`);
   }
 }
@@ -218,8 +203,7 @@ function cmdList(limit: number, global: boolean, all: boolean): void {
 
   for (const row of rows) {
     const date = new Date(Number(row.created_at)).toISOString().split("T")[0];
-    const tagsStr = row.tags ? ` [${row.tags}]` : "";
-    console.log(`(${row.id}) ${date}${tagsStr}`);
+    console.log(`(${row.id}) ${date}`);
     console.log(`  ${row.content}`);
   }
 }
@@ -254,6 +238,11 @@ function cmdTags(): void {
   console.log(`  Name:  ${tagInfo.project.projectName}`);
   console.log(`  Path:  ${tagInfo.project.projectPath}`);
   if (tagInfo.project.gitRepoUrl) console.log(`  Git:   ${tagInfo.project.gitRepoUrl}`);
+}
+
+function cmdReset(): void {
+  resetDb();
+  console.log("All memories have been reset. Database cleared.");
 }
 
 function cmdStatus(): void {
@@ -359,7 +348,7 @@ function cmdInstall(
 }
 
 async function main(): Promise<void> {
-  const { command, text, tags, limit, global, all, opencode, claude, codex } = parseArgs(process.argv);
+  const { command, text, limit, global, all, opencode, claude, codex } = parseArgs(process.argv);
 
   // install command doesn't need DB
   if (command === "install") {
@@ -367,10 +356,16 @@ async function main(): Promise<void> {
     return;
   }
 
+  // reset command needs special handling (closes DB first)
+  if (command === "reset") {
+    cmdReset();
+    return;
+  }
+
   try {
     switch (command) {
       case "add":
-        await cmdAdd(text, tags, global);
+        await cmdAdd(text, global);
         break;
       case "search":
         await cmdSearch(text, limit, global);

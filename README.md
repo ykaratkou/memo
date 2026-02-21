@@ -1,6 +1,6 @@
 # memo
 
-Persistent memory for LLM agent sessions. Local embeddings, semantic search, project-scoped.
+Persistent memory for LLM agent sessions. Local embeddings, **hybrid semantic + keyword search**, project-scoped.
 
 ## Install
 
@@ -21,12 +21,13 @@ memo install skills --codex      # Codex CLI
 ## Commands
 
 ```bash
-memo add <text> [--tags t1,t2]   # store a memory
-memo search <query> [--limit N]  # semantic search
-memo list [--limit N] [--all]    # list recent memories (--all for no limit)
-memo forget <id>                 # delete by id
-memo tags                        # show project/user info
-memo status                      # system status
+memo add <text>                   # store a memory
+memo search <query> [--limit N]   # hybrid semantic + keyword search
+memo list [--limit N] [--all]     # list recent memories (--all for no limit)
+memo forget <id>                  # delete by id
+memo reset                        # reset all memories (irreversible)
+memo tags                         # show project/user info
+memo status                       # system status
 ```
 
 All commands are **project-scoped by default**. Add `--global` to operate across all projects.
@@ -35,8 +36,8 @@ All commands are **project-scoped by default**. Add `--global` to operate across
 
 ```bash
 # store
-memo add "Auth uses JWT with 24h expiry" --tags auth,jwt
-memo add "User prefers strict TypeScript" --tags style --global
+memo add "Auth uses JWT with 24h expiry"
+memo add "User prefers strict TypeScript" --global
 
 # search
 memo search "authentication"
@@ -45,14 +46,36 @@ memo search "coding style" --global --limit 5
 # manage
 memo list
 memo forget mem_1771355620142_y259isiqp
+memo reset
 ```
 
-Search returns results ranked by similarity:
+Search returns results ranked by similarity (0-1 scale):
 
 ```
-[0.670] (mem_...) 2026-02-17 [auth,jwt]
-  Auth uses JWT with 24h expiry
+[1.000] (mem_...) 2026-02-21
+  weather in barcelona is 19 today
 ```
+
+## How It Works
+
+### Hybrid Search (BM25 + Vectors)
+
+Memo uses **two search mechanisms** that work together:
+
+1. **Vector search** — semantic similarity using local embeddings (understands meaning, synonyms, concepts)
+2. **BM25 keyword search** — precise term matching via SQLite FTS5 (finds exact words and phrases)
+
+Results are combined using **Reciprocal Rank Fusion (RRF)** — a standard technique that:
+- Ranks items higher when they appear in both semantic and keyword results
+- Automatically balances the two without hardcoded weights
+- Produces intuitive scores (0-1 scale)
+
+### Symmetric Embeddings
+
+Unlike typical search systems that use asymmetric prefixes (`search_query:` vs `search_document:`), memo uses symmetric embeddings (`clustering:` prefix). This means:
+- Identical text produces identical vectors → **1.0 score**
+- Better deduplication (same prefix for both sides)
+- More intuitive scores for exact matches
 
 ## Configuration
 
@@ -60,7 +83,7 @@ Search returns results ranked by similarity:
 
 ```jsonc
 {
-  // "similarityThreshold": 0.3,
+  // "similarityThreshold": 0.5,
   // "maxMemories": 10,
   // "embeddingModel": "Xenova/nomic-embed-text-v1",
   // "deduplicationEnabled": true,
@@ -82,3 +105,43 @@ Prompt-based workflows that any LLM agent can run. Installed via `memo install s
 ## Data
 
 Stored in `~/.config/memo/` — database, model cache (~130MB on first run), logs.
+
+## Development
+
+### Setup
+
+```bash
+git clone https://github.com/ykaratkou/memo.git
+cd memo
+bun install
+```
+
+### Running locally
+
+```bash
+# Run commands directly from source
+bun ./src/cli.ts add "test memory"
+bun ./src/cli.ts search "test"
+bun ./src/cli.ts list
+
+# Or use the npm script
+bun run memo add "test memory"
+```
+
+### Testing changes
+
+```bash
+# Reset database for clean testing
+bun ./src/cli.ts reset
+
+# Add test memories
+bun ./src/cli.ts add "weather in barcelona is 19 today"
+bun ./src/cli.ts add "temperature in madrid is 22 degrees"
+
+# Test search
+bun ./src/cli.ts search "barcelona weather"
+```
+
+### Building
+
+No build step required — runs directly as TypeScript via Bun.

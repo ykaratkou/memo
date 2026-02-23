@@ -1,6 +1,9 @@
 import { pipeline, env } from "@xenova/transformers";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { CONFIG } from "./config.ts";
+import { getCachedEmbedding, setCachedEmbedding } from "./db.ts";
 import { log } from "./log.ts";
 
 env.allowLocalModels = true;
@@ -43,14 +46,24 @@ export class EmbeddingService {
 
   private async initializeModel(): Promise<void> {
     try {
-      console.error(
-        `Loading embedding model ${CONFIG.embeddingModel} (first run downloads ~130MB)...`,
-      );
+      // Check if model is already cached
+      const modelCachePath = join(env.cacheDir, CONFIG.embeddingModel, "onnx");
+      const isAlreadyCached = existsSync(modelCachePath);
+
+      if (!isAlreadyCached) {
+        console.error(
+          `Loading embedding model ${CONFIG.embeddingModel} (first run downloads ~130MB)...`,
+        );
+      }
+
       this.pipe = await pipeline("feature-extraction", CONFIG.embeddingModel, {
         quantized: true,
       });
       this.isWarmedUp = true;
-      console.error("Model loaded.");
+
+      if (!isAlreadyCached) {
+        console.error("Model loaded.");
+      }
     } catch (error) {
       this.initPromise = null;
       log("Failed to initialize embedding model", { error: String(error) });
@@ -68,22 +81,45 @@ export class EmbeddingService {
   }
 
   async embed(text: string): Promise<Float32Array> {
-    const cached = this.cache.get(text);
-    if (cached) return cached;
+    // L1: in-memory LRU cache (hot path, no DB access)
+    const memoryCached = this.cache.get(text);
+    if (memoryCached) return memoryCached;
+
+    // L2: persistent SQLite cache (survives restarts, skips ONNX inference)
+    const contentHash = createHash("sha256").update(text).digest("hex");
+    try {
+      const dbCached = getCachedEmbedding(contentHash, CONFIG.embeddingModel);
+      if (dbCached) {
+        this.setMemoryCache(text, dbCached);
+        return dbCached;
+      }
+    } catch {
+      // DB not available (e.g., during isolated embedding use) — skip
+    }
 
     await this.ensureReady();
 
     const output = await this.pipe(text, { pooling: "mean", normalize: true });
     const result = new Float32Array(output.data);
 
-    // LRU eviction
+    this.setMemoryCache(text, result);
+
+    // Persist to DB cache for future process restarts
+    try {
+      setCachedEmbedding(contentHash, CONFIG.embeddingModel, result);
+    } catch {
+      // DB write failed — not critical, inference result is still returned
+    }
+
+    return result;
+  }
+
+  private setMemoryCache(text: string, vector: Float32Array): void {
     if (this.cache.size >= MAX_CACHE_SIZE) {
       const firstKey = this.cache.keys().next().value;
       if (firstKey !== undefined) this.cache.delete(firstKey);
     }
-    this.cache.set(text, result);
-
-    return result;
+    this.cache.set(text, vector);
   }
 
   async embedWithTimeout(text: string): Promise<Float32Array> {

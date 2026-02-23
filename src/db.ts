@@ -129,6 +129,19 @@ function initSchema(db: Database): void {
       tokenize='unicode61'
     )
   `);
+
+  // Persistent embedding cache — keyed by content hash + model.
+  // Survives process restarts, avoids re-running ONNX inference for
+  // previously seen text. Invalidated naturally on model change.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS embedding_cache (
+      content_hash TEXT NOT NULL,
+      model TEXT NOT NULL,
+      embedding BLOB NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (content_hash, model)
+    )
+  `);
 }
 
 export function getDb(): Database {
@@ -307,6 +320,64 @@ export function findExactDuplicate(
     )
     .get(content, containerTag) as any;
   return row ? row.id : null;
+}
+
+export function getCachedEmbedding(
+  contentHash: string,
+  model: string,
+): Float32Array | null {
+  const db = getDb();
+  const row = db
+    .query(
+      "SELECT embedding FROM embedding_cache WHERE content_hash = ? AND model = ?",
+    )
+    .get(contentHash, model) as { embedding: Uint8Array } | null;
+
+  if (!row) return null;
+  return new Float32Array(row.embedding.buffer, row.embedding.byteOffset, row.embedding.byteLength / 4);
+}
+
+export function setCachedEmbedding(
+  contentHash: string,
+  model: string,
+  vector: Float32Array,
+): void {
+  const db = getDb();
+  const vectorBuffer = new Uint8Array(vector.buffer);
+  db.run(
+    `INSERT OR REPLACE INTO embedding_cache (content_hash, model, embedding, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [contentHash, model, vectorBuffer, Date.now()],
+  );
+}
+
+export function reindexFts(): { added: number; removed: number } {
+  const db = getDb();
+
+  // Remove orphaned FTS entries (memory was deleted but FTS row remains)
+  const orphaned = db
+    .query(
+      "SELECT memory_id FROM fts_memories WHERE memory_id NOT IN (SELECT id FROM memories)",
+    )
+    .all() as { memory_id: string }[];
+  for (const row of orphaned) {
+    db.run("DELETE FROM fts_memories WHERE memory_id = ?", [row.memory_id]);
+  }
+
+  // Add missing FTS entries
+  const missing = db
+    .query(
+      "SELECT id, content, container_tag FROM memories WHERE id NOT IN (SELECT memory_id FROM fts_memories)",
+    )
+    .all() as { id: string; content: string; container_tag: string }[];
+  for (const row of missing) {
+    db.run(
+      "INSERT INTO fts_memories (content, memory_id, container_tag) VALUES (?, ?, ?)",
+      [row.content, row.id, row.container_tag],
+    );
+  }
+
+  return { added: missing.length, removed: orphaned.length };
 }
 
 export function resetDb(): void {

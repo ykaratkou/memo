@@ -29,7 +29,7 @@ const DEFAULTS = {
   storagePath: join(CONFIG_DIR, "data"),
   embeddingModel: "Xenova/nomic-embed-text-v1",
   embeddingDimensions: 768,
-  similarityThreshold: 0.5,
+  similarityThreshold: 0.7,
   minVectorSimilarity: 0.6,
   maxMemories: 10,
   deduplicationEnabled: true,
@@ -106,7 +106,7 @@ const CONFIG_TEMPLATE = `{
   // Search Settings
   // ============================================
   // Minimum final score (0-1) to include a result
-  // "similarityThreshold": 0.5,
+  // "similarityThreshold": 0.7,
 
   // Minimum cosine similarity for vector results to enter hybrid scoring
   // Prevents unrelated memories from appearing via KNN alone

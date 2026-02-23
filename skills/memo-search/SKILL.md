@@ -28,13 +28,6 @@ The search combines:
 
 Adjust `--limit` based on how broad the search is. Use a higher limit for broad topics, lower for specific lookups.
 
-If the search is broad or might span multiple topics, run several targeted searches:
-
-```bash
-memo search "<term 1>"
-memo search "<term 2>"
-```
-
 ## Scope
 
 - By default, search is scoped to the **current project**.
@@ -55,4 +48,3 @@ This returns all memories without semantic ranking. Use it for browsing rather t
 - **Hybrid search finds both semantic and keyword matches.** A query for "database" will find memories about "PostgreSQL" (semantic) AND memories containing the word "database" (keyword). Exact keyword matches typically score higher (closer to 1.0).
 - **Scores are 0-1 scale.** 1.0 = exact match in both vector and keyword search. Lower scores still indicate relevance through semantic similarity.
 - **No results doesn't mean no information.** The user may simply not have stored that information yet — suggest adding it.
-- **Be proactive but not noisy.** When using search to inform a task, integrate the knowledge quietly. Only call out memories explicitly when they're directly relevant to the user's question.

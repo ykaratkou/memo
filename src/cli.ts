@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { insertMemory, deleteMemory, listMemories, countMemories, closeDb, resetDb } from "./db.ts";
+import { insertMemory, deleteMemory, listMemories, countMemories, closeDb, resetDb, reindexFts } from "./db.ts";
 import type { MemoryRecord } from "./db.ts";
 import { searchMemories } from "./search.ts";
 import { embeddingService } from "./embed.ts";
@@ -17,10 +17,12 @@ const USAGE = `memo - persistent memory for LLM agent sessions
 
 Commands:
   memo add <text>                   Store a memory (scoped to current project)
-  memo search <query> [--limit N]   Hybrid semantic + keyword search (default top ${CONFIG.maxMemories})
+  memo search <query> [--limit N] [--threshold N]
+                                    Hybrid semantic + keyword search (default top ${CONFIG.maxMemories})
   memo list [--limit N] [--all]     List recent memories (--all for no limit)
   memo forget <id>                  Delete a memory by ID
   memo reset                        Reset all memories (irreversible)
+  memo reindex                      Rebuild search indexes
   memo tags                         Show detected project/user info
   memo status                       Show system status
   memo install skills <target>      Install agent skills (--opencode, --claude, --codex)
@@ -35,6 +37,7 @@ function parseArgs(argv: string[]): {
   command: string;
   text: string;
   limit: number;
+  threshold: number | undefined;
   global: boolean;
   all: boolean;
   opencode: boolean;
@@ -45,6 +48,7 @@ function parseArgs(argv: string[]): {
   let command = "";
   const textParts: string[] = [];
   let limit = CONFIG.maxMemories;
+  let threshold: number | undefined = undefined;
   let global = false;
   let all = false;
   let opencode = false;
@@ -85,6 +89,12 @@ function parseArgs(argv: string[]): {
       i += 2;
       continue;
     }
+    if (arg === "--threshold" && i + 1 < args.length) {
+      threshold = parseFloat(args[i + 1]!);
+      if (isNaN(threshold)) threshold = undefined;
+      i += 2;
+      continue;
+    }
     if (arg === "--help" || arg === "-h") {
       command = "help";
       i++;
@@ -103,6 +113,7 @@ function parseArgs(argv: string[]): {
     command: command || "help",
     text: textParts.join(" "),
     limit,
+    threshold,
     global,
     all,
     opencode,
@@ -163,9 +174,9 @@ async function cmdAdd(text: string, global: boolean): Promise<void> {
   console.log(`Stored: ${id}`);
 }
 
-async function cmdSearch(query: string, limit: number, global: boolean): Promise<void> {
+async function cmdSearch(query: string, limit: number, global: boolean, threshold?: number): Promise<void> {
   if (!query) {
-    console.error("Error: no query provided.\n\nUsage: memo search <query> [--limit N]");
+    console.error("Error: no query provided.\n\nUsage: memo search <query> [--limit N] [--threshold N]");
     process.exit(1);
   }
 
@@ -175,7 +186,7 @@ async function cmdSearch(query: string, limit: number, global: boolean): Promise
 
   // Embed query with symmetric clustering prefix (same as storage)
   const queryVector = await embeddingService.embedText(query);
-  const results = searchMemories(queryVector, containerTag, query, limit);
+  const results = searchMemories(queryVector, containerTag, query, limit, threshold);
 
   if (results.length === 0) {
     console.log("No memories found.");
@@ -243,6 +254,17 @@ function cmdTags(): void {
 function cmdReset(): void {
   resetDb();
   console.log("All memories have been reset. Database cleared.");
+}
+
+function cmdReindex(): void {
+  const { added, removed } = reindexFts();
+  if (added === 0 && removed === 0) {
+    console.log("Search indexes are up to date.");
+  } else {
+    if (added > 0) console.log(`Added ${added} missing entries to search index.`);
+    if (removed > 0) console.log(`Removed ${removed} orphaned entries from search index.`);
+    console.log("Reindex complete.");
+  }
 }
 
 function cmdStatus(): void {
@@ -348,7 +370,7 @@ function cmdInstall(
 }
 
 async function main(): Promise<void> {
-  const { command, text, limit, global, all, opencode, claude, codex } = parseArgs(process.argv);
+  const { command, text, limit, threshold, global, all, opencode, claude, codex } = parseArgs(process.argv);
 
   // install command doesn't need DB
   if (command === "install") {
@@ -368,7 +390,7 @@ async function main(): Promise<void> {
         await cmdAdd(text, global);
         break;
       case "search":
-        await cmdSearch(text, limit, global);
+        await cmdSearch(text, limit, global, threshold);
         break;
       case "list":
         cmdList(limit, global, all);
@@ -381,6 +403,9 @@ async function main(): Promise<void> {
         break;
       case "status":
         cmdStatus();
+        break;
+      case "reindex":
+        cmdReindex();
         break;
       case "help":
         console.log(USAGE);

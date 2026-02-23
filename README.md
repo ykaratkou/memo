@@ -83,7 +83,7 @@ Unlike typical search systems that use asymmetric prefixes (`search_query:` vs `
 
 ```jsonc
 {
-  // "similarityThreshold": 0.5,
+  // "similarityThreshold": 0.7,
   // "maxMemories": 10,
   // "embeddingModel": "Xenova/nomic-embed-text-v1",
   // "deduplicationEnabled": true,

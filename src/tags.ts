@@ -16,6 +16,12 @@ export interface TagInfo {
   gitRepoUrl?: string;
 }
 
+export interface NamedContainerInfo {
+  tag: string;
+  normalizedName: string;
+  displayName: string;
+}
+
 function getGitEmail(): string | null {
   try {
     return execSync("git config user.email", { encoding: "utf-8" }).trim() || null;
@@ -121,5 +127,31 @@ export function getTags(directory: string): {
   return {
     user: getUserTagInfo(),
     project: getProjectTagInfo(directory),
+  };
+}
+
+function normalizeContainerName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export function getNamedContainerInfo(name: string): NamedContainerInfo {
+  const displayName = name.trim();
+  if (!displayName) {
+    throw new Error("Container name cannot be empty.");
+  }
+
+  const normalizedName = normalizeContainerName(displayName);
+  if (!normalizedName) {
+    throw new Error("Container name must include at least one letter or number.");
+  }
+
+  return {
+    tag: `memo_container_${normalizedName}`,
+    normalizedName,
+    displayName,
   };
 }

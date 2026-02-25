@@ -51,6 +51,7 @@ src/
 ├── db.ts         SQLite schema, CRUD operations, extension loading.
 ├── search.ts     Hybrid search: vector KNN + BM25 + RRF fusion.
 ├── embed.ts      Embedding service. Model loading, inference, LRU cache.
+├── importer.ts   Markdown import. Recursive file discovery + chunking.
 ├── dedup.ts      Two-tier deduplication (exact match + cosine similarity).
 ├── tags.ts       Project/user identity via SHA-256 hashed tags.
 ├── privacy.ts    Strip <private> tags before storage.
@@ -66,6 +67,7 @@ cli.ts (entry point)
   ├── embed.ts ──── config.ts, db.ts, log.ts
   ├── db.ts ─────── config.ts, log.ts
   ├── search.ts ─── db.ts, config.ts, log.ts
+  ├── importer.ts ─ privacy.ts
   ├── dedup.ts ──── db.ts, search.ts, config.ts
   ├── privacy.ts    (no dependencies)
   ├── tags.ts       (no dependencies)
@@ -377,11 +379,42 @@ The threshold of 0.9 is intentionally high — only very similar content is bloc
 
 Deduplication can be disabled via `"deduplicationEnabled": false` in config.
 
+## Markdown Import
+
+Defined in `src/importer.ts` and wired through `memo import` in `src/cli.ts`.
+
+`memo import` supports importing a single markdown file or recursively importing a directory of markdown files (`.md`, `.markdown`, `.mdx`). Each file is chunked and stored as multiple `memories` rows with:
+
+- `type = "doc_chunk"`
+- `tags = <source file key>` (absolute normalized path)
+- `metadata` containing source path, line range, and chunk index
+
+### Chunking Algorithm
+
+Chunking uses a line-aware sliding window inspired by OpenClaw:
+
+- `maxChars = chunkTokens * 4` (default `400 * 4 = 1600` chars)
+- `overlapChars = overlapTokens * 4` (default `80 * 4 = 320` chars)
+- line-preserving segmentation, including long-line splitting when needed
+- overlap carry from the tail of the previous chunk
+
+This preserves local context across chunk boundaries and makes search output attributable back to source files and line ranges.
+
+### Replace/Sync Behavior
+
+Imports are synchronized per source file (not append-only):
+
+1. Build new embeddings for all chunks in a source file
+2. Delete existing `doc_chunk` rows for the same `(container_tag, source file key)`
+3. Insert the fresh chunk set
+
+This means re-running `memo import` after docs change will replace stale chunks from those files while leaving other files in the same container untouched.
+
 ## Project and User Scoping
 
 Defined in `src/tags.ts`.
 
-Every memory is tagged with a `container_tag` that scopes it to a project (default) or user (`--global` flag). Tags are SHA-256 hashes truncated to 16 hex characters, prefixed with `memo_project_` or `memo_user_`.
+Every memory is tagged with a `container_tag` that scopes it to a project (default), user (`--global` flag), or a named container (`--container <name>` / `memo import <container> <path>`). Project and user tags are SHA-256 hashes truncated to 16 hex characters, prefixed with `memo_project_` or `memo_user_`. Named containers use deterministic slug tags prefixed with `memo_container_`.
 
 ### Project Tags
 
@@ -403,6 +436,18 @@ tag = "memo_user_" + sha256(gitEmail || gitName || $USER || "anonymous").slice(0
 ```
 
 Prefers `git config user.email` as the most stable identifier. Falls back through `git config user.name`, `$USER` environment variable, and finally `"anonymous"`.
+
+### Named Container Tags
+
+When `--container <name>` is provided, memo derives:
+
+```
+normalized = trim(name).toLowerCase()
+normalized = normalized.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
+tag = "memo_container_" + normalized
+```
+
+This gives deterministic, human-readable scopes for imported documentation sets and ad-hoc memory groups.
 
 ### Why Hashes?
 

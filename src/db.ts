@@ -178,6 +178,7 @@ export interface MemoryRecord {
   content: string;
   vector: Float32Array;
   containerTag: string;
+  tags?: string;
   type?: string;
   createdAt: number;
   updatedAt: number;
@@ -197,16 +198,17 @@ export function insertMemory(record: MemoryRecord): void {
   // Insert into main memories table
   db.run(
     `INSERT INTO memories (
-      id, content, vector, container_tag, type,
+      id, content, vector, container_tag, tags, type,
       created_at, updated_at, metadata,
       display_name, user_name, user_email,
       project_path, project_name, git_repo_url
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       record.id,
       record.content,
       vectorBuffer,
       record.containerTag,
+      record.tags || null,
       record.type || null,
       record.createdAt,
       record.updatedAt,
@@ -231,6 +233,63 @@ export function insertMemory(record: MemoryRecord): void {
     `INSERT INTO fts_memories (content, memory_id, container_tag) VALUES (?, ?, ?)`,
     [record.content, record.id, record.containerTag],
   );
+}
+
+export function replaceImportedChunksForSource(
+  containerTag: string,
+  sourceKey: string,
+  records: MemoryRecord[],
+): { deleted: number; inserted: number } {
+  const db = getDb();
+
+  db.run("BEGIN");
+
+  try {
+    const row = db
+      .query(
+        "SELECT COUNT(*) as count FROM memories WHERE container_tag = ? AND type = 'doc_chunk' AND tags = ?",
+      )
+      .get(containerTag, sourceKey) as { count: number } | null;
+
+    const deleted = Number(row?.count || 0);
+
+    if (deleted > 0) {
+      db.run(
+        `DELETE FROM vec_memories WHERE memory_id IN (
+          SELECT id FROM memories
+          WHERE container_tag = ? AND type = 'doc_chunk' AND tags = ?
+        )`,
+        [containerTag, sourceKey],
+      );
+
+      db.run(
+        `DELETE FROM fts_memories WHERE memory_id IN (
+          SELECT id FROM memories
+          WHERE container_tag = ? AND type = 'doc_chunk' AND tags = ?
+        )`,
+        [containerTag, sourceKey],
+      );
+
+      db.run(
+        "DELETE FROM memories WHERE container_tag = ? AND type = 'doc_chunk' AND tags = ?",
+        [containerTag, sourceKey],
+      );
+    }
+
+    for (const record of records) {
+      insertMemory(record);
+    }
+
+    db.run("COMMIT");
+
+    return {
+      deleted,
+      inserted: records.length,
+    };
+  } catch (error) {
+    db.run("ROLLBACK");
+    throw error;
+  }
 }
 
 export function deleteMemory(memoryId: string): boolean {

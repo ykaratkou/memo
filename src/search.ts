@@ -10,6 +10,8 @@ export interface SearchResult {
   content: string;
   similarity: number;
   createdAt: number;
+  type?: string;
+  metadata?: string;
   displayName?: string;
   projectName?: string;
   gitRepoUrl?: string;
@@ -139,14 +141,14 @@ export function searchMemories(
   if (containerTag) {
     rows = db
       .query(
-        `SELECT id, content, created_at, display_name, project_name, git_repo_url
+        `SELECT id, content, type, metadata, created_at, display_name, project_name, git_repo_url
          FROM memories WHERE id IN (${placeholders}) AND container_tag = ?`,
       )
       .all(...ids, containerTag) as any[];
   } else {
     rows = db
       .query(
-        `SELECT id, content, created_at, display_name, project_name, git_repo_url
+        `SELECT id, content, type, metadata, created_at, display_name, project_name, git_repo_url
          FROM memories WHERE id IN (${placeholders})`,
       )
       .all(...ids) as any[];
@@ -182,6 +184,8 @@ export function searchMemories(
       content: row.content,
       similarity,
       createdAt: row.created_at,
+      type: row.type || undefined,
+      metadata: row.metadata || undefined,
       displayName: row.display_name,
       projectName: row.project_name,
       gitRepoUrl: row.git_repo_url,

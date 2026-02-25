@@ -22,8 +22,12 @@ memo install skills --codex      # Codex CLI
 
 ```bash
 memo add <text>                   # store a memory
-memo search <query> [--limit N]   # hybrid semantic + keyword search
-memo list [--limit N] [--all]     # list recent memories (--all for no limit)
+memo import <path>                # import markdown file/folder into current project scope
+memo import <container> <path>    # import markdown into a named container
+memo search <query> [--limit N] [--container NAME]
+                                  # hybrid semantic + keyword search
+memo list [--limit N] [--all] [--container NAME]
+                                  # list recent memories (--all for no limit)
 memo forget <id>                  # delete by id
 memo reset                        # reset all memories (irreversible)
 memo tags                         # show project/user info
@@ -42,9 +46,15 @@ memo add "User prefers strict TypeScript" --global
 # search
 memo search "authentication"
 memo search "coding style" --global --limit 5
+memo search "router loader" --container react-router
+
+# import docs
+memo import ./docs
+memo import react-router ./vendor/react-router/docs
 
 # manage
 memo list
+memo list --container react-router
 memo forget mem_1771355620142_y259isiqp
 memo reset
 ```
@@ -89,6 +99,29 @@ Unlike typical search systems that use asymmetric prefixes (`search_query:` vs `
   // "deduplicationEnabled": true,
   // "customSqlitePath": "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib",
 }
+```
+
+## Markdown Import
+
+`memo import` chunks markdown files and stores each chunk as searchable memory.
+
+- Supported inputs: single file or directory (recursive)
+- Supported extensions: `.md`, `.markdown`, `.mdx`
+- Default chunking: `--chunk-tokens 400` and `--overlap-tokens 80`
+- Re-import behavior: previously imported chunks from the same file are replaced (sync, not append)
+
+Examples:
+
+```bash
+# import into current project container
+memo import ./docs
+
+# import into a named container
+memo import react-router ./docs
+memo import ./docs --container react-router
+
+# search imported docs
+memo search "loader API" --container react-router
 ```
 
 ## Agent Skills

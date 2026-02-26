@@ -33,7 +33,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 
-# Old local db (removed, now stored in ~/.config/memo/)
+# Per-project memo database
+.memo
+
+# Old local db (removed)
 memo.db*
 
 # Old model cache (removed, now stored in ~/.config/memo/data/.cache/)

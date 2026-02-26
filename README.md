@@ -21,36 +21,41 @@ memo install skills --codex      # Codex CLI
 ## Commands
 
 ```bash
-memo add <text>                   # store a memory
-memo import <path>                # import markdown file/folder into current project scope
-memo import <container> <path>    # import markdown into a named container
+memo add <text>                   # store a memory (--container N to target a container)
+memo import --markdown <path>     # import markdown file/folder
+memo import --repo-map <file.json>
+                                  # import tree-sitter project map (JSON)
 memo search <query> [--limit N] [--container NAME]
                                   # hybrid semantic + keyword search
 memo list [--limit N] [--all] [--container NAME]
                                   # list recent memories (--all for no limit)
 memo forget <id>                  # delete by id
-memo reset                        # reset all memories (irreversible)
-memo tags                         # show project/user info
+memo reset                        # reset project memories (irreversible)
+memo tags                         # show project info
 memo status                       # system status
 ```
 
-All commands are **project-scoped by default**. Add `--global` to operate across all projects.
+All data is stored **per project** in `.memo/memo.db` (shared across git worktrees of the same repo). Add `.memo/` to your `.gitignore`.
 
 ## Examples
 
 ```bash
 # store
 memo add "Auth uses JWT with 24h expiry"
-memo add "User prefers strict TypeScript" --global
+memo add "User prefers strict TypeScript"
 
 # search
 memo search "authentication"
-memo search "coding style" --global --limit 5
+memo search "coding style" --limit 5
 memo search "router loader" --container react-router
 
 # import docs
-memo import ./docs
-memo import react-router ./vendor/react-router/docs
+memo import --markdown ./docs
+memo import --markdown ./vendor/react-router/docs --container react-router
+
+# import tree-sitter project map
+memo import --repo-map repo-map.json
+memo import --repo-map repo-map.json --container my-project
 
 # manage
 memo list
@@ -103,7 +108,7 @@ Unlike typical search systems that use asymmetric prefixes (`search_query:` vs `
 
 ## Markdown Import
 
-`memo import` chunks markdown files and stores each chunk as searchable memory.
+`memo import --markdown` chunks markdown files and stores each chunk as searchable memory.
 
 - Supported inputs: single file or directory (recursive)
 - Supported extensions: `.md`, `.markdown`, `.mdx`
@@ -114,14 +119,50 @@ Examples:
 
 ```bash
 # import into current project container
-memo import ./docs
+memo import --markdown ./docs
 
 # import into a named container
-memo import react-router ./docs
-memo import ./docs --container react-router
+memo import --markdown ./docs --container react-router
 
 # search imported docs
 memo search "loader API" --container react-router
+```
+
+## Repo Map Import
+
+`memo import --repo-map` imports a tree-sitter project map — a JSON file describing the codebase structure (files, languages, symbols, code skeletons). This gives LLM agents a way to find relevant files via semantic search instead of grepping the entire project.
+
+Input format (JSON array):
+
+```json
+[
+  {
+    "path": "handlers/users.go",
+    "language": "go",
+    "symbols": ["UserHandler", "HandleUsers", "handle", "list", "create"],
+    "content": "type UserHandler struct {\n\tuserService *services.UserService\n}\n..."
+  }
+]
+```
+
+Each entry is stored as one record. The searchable content combines the file path, language, symbol names, and code skeleton — so queries match on both symbol names (keyword) and code semantics (vector).
+
+- One record per file (no chunking needed — entries are already semantically meaningful units)
+- Re-import replaces all previous entries from the same JSON file
+- Only `path` is required; `language`, `symbols`, and `content` are optional
+
+Examples:
+
+```bash
+# generate with your tree-sitter tool, then import
+treesitter-tool parse ./src > repo-map.json
+memo import --repo-map repo-map.json
+
+# import into a named container
+memo import --repo-map repo-map.json --container my-project
+
+# search for files related to user creation
+memo search "create user" --threshold 0.5
 ```
 
 ## Agent Skills
@@ -137,7 +178,10 @@ Prompt-based workflows that any LLM agent can run. Installed via `memo install s
 
 ## Data
 
-Stored in `~/.config/memo/` — database, model cache (~130MB on first run), logs.
+- **Project data**: `.memo/memo.db` in the project root (per-project, shared across git worktrees)
+- **Model cache**: `~/.config/memo/data/.cache/` (~130MB on first run, shared globally)
+- **Config**: `~/.config/memo/config.jsonc`
+- **Logs**: `~/.config/memo/data/memo.log`
 
 ## Development
 

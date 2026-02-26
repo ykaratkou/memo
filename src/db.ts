@@ -1,14 +1,46 @@
 import { Database } from "bun:sqlite";
 import * as sqliteVec from "sqlite-vec";
 import { existsSync, mkdirSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { execSync } from "node:child_process";
+import { dirname, join, resolve } from "node:path";
 import { CONFIG } from "./config.ts";
 import { log } from "./log.ts";
 
-const DB_PATH = join(CONFIG.storagePath, "memo.db");
-
 let _db: Database | null = null;
+let _dbPath: string | null = null;
 let sqliteConfigured = false;
+
+/**
+ * Resolve the project root directory for the per-project DB.
+ * Uses git-common-dir so worktrees of the same repo share one DB.
+ * Falls back to cwd for non-git directories.
+ */
+function resolveProjectRoot(cwd: string): string {
+  try {
+    const gitCommonDir = execSync(
+      "git rev-parse --path-format=absolute --git-common-dir",
+      { encoding: "utf-8", cwd, stdio: ["pipe", "pipe", "pipe"] },
+    ).trim();
+    if (gitCommonDir) {
+      // git-common-dir returns e.g. /path/to/project/.git
+      // Strip trailing /.git to get the project root
+      return resolve(gitCommonDir, "..");
+    }
+  } catch {
+    // Not a git repo
+  }
+  return cwd;
+}
+
+/**
+ * Get the per-project DB path: <project-root>/.memo/memo.db
+ */
+export function getDbPath(cwd?: string): string {
+  if (_dbPath) return _dbPath;
+  const projectRoot = resolveProjectRoot(cwd || process.cwd());
+  _dbPath = join(projectRoot, ".memo", "memo.db");
+  return _dbPath;
+}
 
 function configureSqlite(): void {
   if (sqliteConfigured) return;
@@ -149,14 +181,15 @@ export function getDb(): Database {
 
   configureSqlite();
 
-  const dir = dirname(DB_PATH);
+  const dbPath = getDbPath();
+  const dir = dirname(dbPath);
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
 
-  _db = new Database(DB_PATH);
+  _db = new Database(dbPath);
   initSchema(_db);
-  log("Database opened", { path: DB_PATH });
+  log("Database opened", { path: dbPath });
 
   return _db;
 }
@@ -292,6 +325,14 @@ export function replaceImportedChunksForSource(
   }
 }
 
+export function getMemoryContainerTag(memoryId: string): string | null {
+  const db = getDb();
+  const row = db
+    .query("SELECT container_tag FROM memories WHERE id = ?")
+    .get(memoryId) as { container_tag: string } | null;
+  return row?.container_tag ?? null;
+}
+
 export function deleteMemory(memoryId: string): boolean {
   const db = getDb();
   const existing = db
@@ -312,47 +353,23 @@ export function listMemories(
 ): any[] {
   const db = getDb();
 
-  if (containerTag) {
-    if (limit < 0) {
-      return db
-        .query(
-          `SELECT id, content, type, created_at, updated_at,
-                  display_name, project_name, git_repo_url
-           FROM memories WHERE container_tag = ?
-           ORDER BY created_at DESC`,
-        )
-        .all(containerTag) as any[];
-    }
-    return db
-      .query(
-        `SELECT id, content, type, created_at, updated_at,
-                display_name, project_name, git_repo_url
-         FROM memories WHERE container_tag = ?
-         ORDER BY created_at DESC LIMIT ?`,
-      )
-      .all(containerTag, limit) as any[];
-  }
-
-  if (limit < 0) {
-    return db
-      .query(
-        `SELECT id, content, type, created_at, updated_at,
-                display_name, project_name, git_repo_url
-         FROM memories ORDER BY created_at DESC`,
-      )
-      .all() as any[];
-  }
+  const whereClause = containerTag ? "WHERE container_tag = ?" : "";
+  const limitClause = limit >= 0 ? "LIMIT ?" : "";
+  const params: any[] = [];
+  if (containerTag) params.push(containerTag);
+  if (limit >= 0) params.push(limit);
 
   return db
     .query(
       `SELECT id, content, type, created_at, updated_at,
               display_name, project_name, git_repo_url
-       FROM memories ORDER BY created_at DESC LIMIT ?`,
+       FROM memories ${whereClause}
+       ORDER BY created_at DESC ${limitClause}`,
     )
-    .all(limit) as any[];
+    .all(...params) as any[];
 }
 
-export function countMemories(containerTag: string | null): number {
+export function countMemories(containerTag?: string): number {
   const db = getDb();
 
   if (containerTag) {
@@ -366,6 +383,16 @@ export function countMemories(containerTag: string | null): number {
     .query("SELECT COUNT(*) as count FROM memories")
     .get() as any;
   return result.count;
+}
+
+export function countMemoriesByContainer(): { containerTag: string; count: number }[] {
+  const db = getDb();
+  const rows = db
+    .query(
+      "SELECT container_tag, COUNT(*) as count FROM memories GROUP BY container_tag ORDER BY count DESC",
+    )
+    .all() as { container_tag: string; count: number }[];
+  return rows.map((row) => ({ containerTag: row.container_tag, count: row.count }));
 }
 
 export function findExactDuplicate(
@@ -440,10 +467,11 @@ export function reindexFts(): { added: number; removed: number } {
 }
 
 export function resetDb(): void {
+  const dbPath = getDbPath();
   closeDb();
   try {
-    unlinkSync(DB_PATH);
-    log("Database reset", { path: DB_PATH });
+    unlinkSync(dbPath);
+    log("Database reset", { path: dbPath });
   } catch (error) {
     // File might not exist, that's fine
     if ((error as any).code !== "ENOENT") {

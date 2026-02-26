@@ -6,7 +6,7 @@ function sha256(input: string): string {
   return createHash("sha256").update(input).digest("hex").slice(0, 16);
 }
 
-export interface TagInfo {
+export interface ProjectInfo {
   tag: string;
   displayName: string;
   userName?: string;
@@ -74,39 +74,11 @@ function getProjectName(directory: string): string {
   return parts[parts.length - 1] || directory;
 }
 
-export function getUserTagInfo(): TagInfo {
-  const email = getGitEmail();
-  const name = getGitName();
-
-  if (email) {
-    return {
-      tag: `memo_user_${sha256(email)}`,
-      displayName: name || email,
-      userName: name || undefined,
-      userEmail: email,
-    };
-  }
-
-  const fallback =
-    name || process.env.USER || process.env.USERNAME || "anonymous";
-  return {
-    tag: `memo_user_${sha256(fallback)}`,
-    displayName: fallback,
-    userName: fallback,
-  };
-}
-
-export function getProjectTagInfo(directory: string): TagInfo {
+export function getProjectInfo(directory: string): ProjectInfo {
   const gitRepoUrl = getGitRepoUrl(directory);
-
-  // Use git common dir as a stable identity across worktrees.
-  // For all worktrees of the same repo, this resolves to the same
-  // absolute path (e.g. /path/to/repo/.git), producing the same tag.
   const gitCommonDir = getGitCommonDir(directory);
   const tagSource = gitCommonDir || directory;
 
-  // Derive project name from git root (parent of .git dir) when available,
-  // so worktrees share the same display name as the main checkout.
   const projectName = gitCommonDir
     ? getProjectName(resolve(gitCommonDir, ".."))
     : getProjectName(directory);
@@ -114,19 +86,11 @@ export function getProjectTagInfo(directory: string): TagInfo {
   return {
     tag: `memo_project_${sha256(tagSource)}`,
     displayName: projectName,
+    userName: getGitName() || undefined,
+    userEmail: getGitEmail() || undefined,
     projectPath: directory,
     projectName,
     gitRepoUrl: gitRepoUrl || undefined,
-  };
-}
-
-export function getTags(directory: string): {
-  user: TagInfo;
-  project: TagInfo;
-} {
-  return {
-    user: getUserTagInfo(),
-    project: getProjectTagInfo(directory),
   };
 }
 

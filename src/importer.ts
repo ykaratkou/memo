@@ -3,6 +3,89 @@ import { lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import { stripPrivateContent } from "./privacy.ts";
 
+// ── Repo-map (tree-sitter) types ────────────────────────────────
+
+export interface RepoMapEntry {
+  path: string;
+  language: string;
+  symbols: string[];
+  content: string;
+}
+
+export interface RepoMapResult {
+  sourceKey: string;
+  entries: RepoMapEntry[];
+}
+
+/**
+ * Build the text that will be embedded and stored in FTS for a repo-map entry.
+ * Format:  "<path> [<language>] <symbols joined by space>\n<content>"
+ */
+export function buildRepoMapContent(entry: RepoMapEntry): string {
+  const header = `${entry.path} [${entry.language}] ${entry.symbols.join(" ")}`;
+  return entry.content ? `${header}\n${entry.content}` : header;
+}
+
+/**
+ * Read and validate a tree-sitter repo-map JSON file.
+ * Returns the parsed entries and a stable sourceKey for replace logic.
+ */
+export function collectRepoMapEntries(jsonPath: string, cwd: string): RepoMapResult {
+  const resolvedPath = resolve(cwd, jsonPath);
+
+  let raw: string;
+  try {
+    raw = readFileSync(resolvedPath, "utf-8");
+  } catch {
+    throw new Error(`Repo-map file not found: ${resolvedPath}`);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`Invalid JSON in repo-map file: ${resolvedPath}`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Repo-map file must contain a JSON array, got ${typeof parsed}`);
+  }
+
+  const entries: RepoMapEntry[] = [];
+
+  for (let i = 0; i < parsed.length; i++) {
+    const item = parsed[i];
+    if (!item || typeof item !== "object") {
+      throw new Error(`Repo-map entry ${i} is not an object`);
+    }
+
+    const obj = item as Record<string, unknown>;
+
+    if (typeof obj.path !== "string" || !obj.path) {
+      throw new Error(`Repo-map entry ${i} is missing required "path" field`);
+    }
+
+    entries.push({
+      path: obj.path,
+      language: typeof obj.language === "string" ? obj.language : "unknown",
+      symbols: Array.isArray(obj.symbols) ? obj.symbols.filter((s): s is string => typeof s === "string") : [],
+      content: typeof obj.content === "string" ? obj.content : "",
+    });
+  }
+
+  let sourceKey = resolvedPath;
+  try {
+    sourceKey = realpathSync(resolvedPath);
+  } catch {
+    // best effort
+  }
+
+  return {
+    sourceKey: `repo-map:${normalizePath(sourceKey)}`,
+    entries,
+  };
+}
+
 export const DEFAULT_IMPORT_CHUNK_TOKENS = 400;
 export const DEFAULT_IMPORT_OVERLAP_TOKENS = 80;
 

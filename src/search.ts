@@ -56,46 +56,50 @@ interface VectorResult {
  * Uses Reciprocal Rank Fusion (RRF) to combine results without normalizing scores.
  */
 export function searchMemories(
-  queryVector: Float32Array,
+  queryVector: Float32Array | null,
   containerTag: string | null,
   queryText?: string,
   limit?: number,
   threshold?: number,
+  skipFullText?: boolean,
 ): SearchResult[] {
   const db = getDb();
   const maxResults = limit ?? CONFIG.maxMemories;
   const minSimilarity = threshold ?? CONFIG.similarityThreshold;
   const minVectorSim = CONFIG.minVectorSimilarity;
-  const queryBuffer = new Uint8Array(queryVector.buffer);
 
   // KNN vector search — returns nearest neighbors by cosine distance.
   // IMPORTANT: KNN always returns k results regardless of actual similarity.
   // We gate on minVectorSimilarity to drop results that aren't genuinely related.
-  const k = maxResults * 4;
-  const rawVectorResults = db
-    .query(
-      `SELECT memory_id, distance FROM vec_memories
-       WHERE embedding MATCH ? AND k = ${k}
-       ORDER BY distance`,
-    )
-    .all(queryBuffer) as { memory_id: string; distance: number }[];
-
-  // Filter by minimum cosine similarity and build ranked map
-  // cosineSim = 1 - cosineDistance (sqlite-vec uses distance, not similarity)
   const vectorResultMap = new Map<string, VectorResult>();
-  let vectorRank = 0;
-  for (const r of rawVectorResults) {
-    const cosineSim = 1 - r.distance;
-    if (cosineSim >= minVectorSim) {
-      vectorResultMap.set(r.memory_id, { rank: vectorRank, cosineSim });
-      vectorRank++;
+
+  if (queryVector) {
+    const queryBuffer = new Uint8Array(queryVector.buffer);
+    const k = maxResults * 4;
+    const rawVectorResults = db
+      .query(
+        `SELECT memory_id, distance FROM vec_memories
+         WHERE embedding MATCH ? AND k = ${k}
+         ORDER BY distance`,
+      )
+      .all(queryBuffer) as { memory_id: string; distance: number }[];
+
+    // Filter by minimum cosine similarity and build ranked map
+    // cosineSim = 1 - cosineDistance (sqlite-vec uses distance, not similarity)
+    let vectorRank = 0;
+    for (const r of rawVectorResults) {
+      const cosineSim = 1 - r.distance;
+      if (cosineSim >= minVectorSim) {
+        vectorResultMap.set(r.memory_id, { rank: vectorRank, cosineSim });
+        vectorRank++;
+      }
     }
   }
 
   // BM25 keyword search via FTS5
   const bm25Rankings = new Map<string, number>();
 
-  if (queryText && queryText.trim().length > 0) {
+  if (!skipFullText && queryText && queryText.trim().length > 0) {
     try {
       const bm25Results = containerTag
         ? db.query(

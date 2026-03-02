@@ -88,5 +88,4 @@ Report the results after all deletions are complete.
 
 - **Never delete without confirmation.** Always show the user what will be removed and what will be kept.
 - **Prefer keeping the most complete memory.** When choosing between duplicates, the one with the most useful information wins, even if it's older.
-- **Respect scope.** Only analyze memories from the current project (don't use `--global` unless the user explicitly asks).
 - **Be conservative.** If two memories are similar but provide genuinely complementary information, keep both.

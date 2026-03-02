@@ -175,6 +175,7 @@ Prompt-based workflows that any LLM agent can run. Installed via `memo install s
 | `memo-search` | Semantic search across stored memories, with proactive context lookup |
 | `memo-resolve-contradictions` | Detect memories that make opposing claims about the same thing, resolve with confirmation |
 | `memo-resolve-duplicates` | Find paraphrases, subsets, and redundant memories that slip past built-in dedup |
+| `memo-summarize-context` | Build domain-grouped memories from files already loaded in session context, then create/update those memories |
 
 ## Data
 

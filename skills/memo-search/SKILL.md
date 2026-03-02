@@ -38,7 +38,6 @@ Adjust `--limit` based on how broad the search is. Use a higher limit for broad 
 
 - By default, search is scoped to the **current project**.
 - Use `--container <name>` to search a specific named container.
-- Only use `--global` if the user explicitly asks to search across all projects.
 
 ## Listing All Memories
 

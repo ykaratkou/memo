@@ -57,7 +57,7 @@ After adding, confirm to the user what was stored. If multiple memories were add
 ## Scope
 
 - By default, memories are scoped to the **current project**.
-- Only use `--global` if the user explicitly asks for a global/cross-project memory.
+- Use `--container <name>` to store memories in a specific named container within the current project.
 
 ## Important Notes
 

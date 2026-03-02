@@ -98,5 +98,4 @@ Report the results after all deletions are complete.
 
 - **Never delete without confirmation.** Always show the user what will be removed.
 - **When in doubt, keep both.** If the contradiction is ambiguous or context-dependent, flag it for the user but do not recommend deletion.
-- **Respect scope.** Only analyze memories from the current project (don't use `--global` unless the user explicitly asks).
 - **Be conservative.** It's better to miss a subtle contradiction than to incorrectly flag compatible memories as contradictory.

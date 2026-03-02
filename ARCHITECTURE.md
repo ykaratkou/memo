@@ -610,6 +610,7 @@ Located in the `skills/` directory. Skills are Markdown files containing prompt-
 | `memo-search` | Guides the agent through searching: extract query terms, run `memo search`, interpret hybrid scores. Suggests `memo list --all` for browsing. |
 | `memo-resolve-duplicates` | Workflow: `memo list --all`, identify paraphrases/subsets, present groups with keep/remove recommendations, batch delete with confirmation. |
 | `memo-resolve-contradictions` | Workflow: `memo list --all`, group by topic, identify opposing claims, present with recommendations, batch delete with confirmation. |
+| `memo-summarize-context` | Workflow: inventory files already loaded in the session context, group symbols by feature domain, draft canonical domain memory blocks, and create/update memories with confirmation for replacements. |
 
 Skills are installed as **symlinks** into agent tool directories via `memo install skills`. This means updates to skill files in the memo repo are immediately reflected in all installed agents.
 

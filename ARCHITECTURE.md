@@ -17,9 +17,6 @@ For usage and installation, see [README.md](README.md).
   - [Stage 3: Reciprocal Rank Fusion](#stage-3-reciprocal-rank-fusion)
   - [Stage 4: Score Normalization](#stage-4-score-normalization)
   - [Stage 5: Threshold Filtering](#stage-5-threshold-filtering)
-- [Import System](#import-system)
-  - [Markdown Import](#markdown-import)
-  - [Repo Map Import](#repo-map-import)
 - [Deduplication](#deduplication)
 - [Project Scoping](#project-scoping)
 - [Privacy Filtering](#privacy-filtering)
@@ -54,9 +51,8 @@ src/
 ├── db.ts         SQLite schema, CRUD operations, extension loading.
 ├── search.ts     Hybrid search: vector KNN + BM25 + RRF fusion.
 ├── embed.ts      Embedding service. Model loading, inference, LRU cache.
-├── importer.ts   Markdown import + repo-map import. File discovery, chunking, JSON parsing.
 ├── dedup.ts      Two-tier deduplication (exact match + cosine similarity).
-├── tags.ts       Project identity via SHA-256 hashed tags.
+├── tags.ts       Project identity (name, path, git URL).
 ├── privacy.ts    Strip <private> tags before storage.
 ├── log.ts        Append-only file logger with 5MB rotation.
 └── jsonc.ts      JSONC comment stripper (state machine parser).
@@ -70,7 +66,6 @@ cli.ts (entry point)
   ├── embed.ts ──── config.ts, db.ts, log.ts
   ├── db.ts ─────── config.ts, log.ts
   ├── search.ts ─── db.ts, config.ts, log.ts
-  ├── importer.ts ─ privacy.ts
   ├── dedup.ts ──── db.ts, search.ts, config.ts
   ├── privacy.ts    (no dependencies)
   ├── tags.ts       (no dependencies)
@@ -83,28 +78,16 @@ The database lives at `<project-root>/.memo/memo.db` — one database per projec
 
 ### `memories` — Main Table
 
-Stores the full memory record with all metadata.
+Stores the memory record.
 
 ```sql
 CREATE TABLE memories (
   id TEXT PRIMARY KEY,           -- "mem_{timestamp}_{random9chars}"
   content TEXT NOT NULL,          -- the memory text
   vector BLOB NOT NULL,           -- Float32Array as raw bytes
-  container_tag TEXT NOT NULL,    -- project or named container scope hash
-  tags TEXT,                      -- source key for imports (file path or "repo-map:<path>")
-  type TEXT,                      -- "doc_chunk" for imports, NULL for memo add
-  created_at INTEGER NOT NULL,    -- epoch ms
-  updated_at INTEGER NOT NULL,    -- epoch ms
-  metadata TEXT,                  -- JSON: source path, line range, language, symbols, etc.
-  display_name TEXT,
-  user_name TEXT,
-  user_email TEXT,
-  project_path TEXT,
-  project_name TEXT,
-  git_repo_url TEXT
+  created_at INTEGER NOT NULL     -- epoch ms
 );
 
-CREATE INDEX idx_container_tag ON memories(container_tag);
 CREATE INDEX idx_created_at ON memories(created_at DESC);
 ```
 
@@ -129,7 +112,6 @@ A virtual table for BM25 keyword ranking. Only `content` is indexed; the other c
 CREATE VIRTUAL TABLE fts_memories USING fts5(
   content,                        -- indexed for keyword search
   memory_id UNINDEXED,           -- stored but not searchable
-  container_tag UNINDEXED,       -- stored but not searchable
   tokenize='unicode61'           -- Unicode-aware tokenization
 );
 ```
@@ -257,7 +239,7 @@ To prevent these irrelevant results from polluting the final output, memo applie
 
 ```sql
 SELECT memory_id, rank FROM fts_memories
-WHERE fts_memories MATCH ? AND container_tag = ?
+WHERE fts_memories MATCH ?
 ORDER BY rank
 LIMIT {limit * 4}
 ```
@@ -367,10 +349,10 @@ Defined in `src/dedup.ts`. Runs before every `memo add` to prevent storing redun
 **Tier 1 — Exact string match:**
 
 ```sql
-SELECT id FROM memories WHERE content = ? AND container_tag = ? LIMIT 1
+SELECT id FROM memories WHERE content = ? LIMIT 1
 ```
 
-Fast exact comparison. If the identical string already exists in the same project scope, the insert is skipped with `similarity: 1.0`.
+Fast exact comparison. If the identical string already exists, the insert is skipped with `similarity: 1.0`.
 
 **Tier 2 — Near-duplicate via cosine similarity:**
 
@@ -382,103 +364,9 @@ The threshold of 0.9 is intentionally high — only very similar content is bloc
 
 Deduplication can be disabled via `"deduplicationEnabled": false` in config.
 
-## Import System
-
-Defined in `src/importer.ts` and wired through `memo import` in `src/cli.ts`.
-
-Memo supports two import modes that share the same storage layer (`type = "doc_chunk"`) but differ in how content is sourced and chunked.
-
-### Markdown Import
-
-`memo import --markdown <path>` imports a single markdown file or recursively imports a directory of markdown files (`.md`, `.markdown`, `.mdx`). Each file is chunked and stored as multiple `memories` rows with:
-
-- `type = "doc_chunk"`
-- `tags = <source file key>` (absolute normalized path)
-- `metadata` containing source path, line range, chunk index, and chunk hash
-
-#### Chunking Algorithm
-
-Chunking uses a line-aware sliding window:
-
-- `maxChars = chunkTokens * 4` (default `400 * 4 = 1600` chars)
-- `overlapChars = overlapTokens * 4` (default `80 * 4 = 320` chars)
-- line-preserving segmentation, including long-line splitting when needed
-- overlap carry from the tail of the previous chunk
-
-This preserves local context across chunk boundaries and makes search output attributable back to source files and line ranges.
-
-#### Replace/Sync Behavior
-
-Imports are synchronized per source file (not append-only):
-
-1. Build new embeddings for all chunks in a source file
-2. Delete existing `doc_chunk` rows for the same `(container_tag, source file key)`
-3. Insert the fresh chunk set
-
-This means re-running `memo import --markdown` after docs change will replace stale chunks from those files while leaving other files in the same container untouched.
-
-### Repo Map Import
-
-`memo import --repo-map <file.json>` imports a tree-sitter project map — a JSON array where each entry describes one source file's structure (path, language, symbols, code skeleton). This gives LLM agents a way to find relevant files via semantic search instead of repeatedly grepping the entire project.
-
-Each entry is stored as **one record** (no chunking) with:
-
-- `type = "doc_chunk"`
-- `tags = "repo-map:<absolute path of JSON file>"` (distinct from markdown imports)
-- `metadata` containing source path, language, symbols array, and `importType: "repo-map"`
-
-#### Input Format
-
-A JSON array of objects. Only `path` is required:
-
-```json
-[
-  {
-    "path": "handlers/users.go",
-    "language": "go",
-    "symbols": ["UserHandler", "HandleUsers", "handle"],
-    "content": "type UserHandler struct { ... }"
-  }
-]
-```
-
-#### Content Construction
-
-The searchable content stored for each entry combines structured metadata with the code skeleton:
-
-```
-{path} [{language}] {symbols joined by space}
-{content}
-```
-
-For example:
-
-```
-handlers/users.go [go] UserHandler HandleUsers handle list create
-type UserHandler struct {
-	userService *services.UserService
-}
-func HandleUsers() http.HandlerFunc { ... }
-```
-
-This means queries match via:
-- **BM25 keyword search**: exact symbol names, file paths, language names
-- **Vector semantic search**: conceptual similarity to the code structure
-
-#### Replace/Sync Behavior
-
-All entries from a given JSON file share the same `tags` value (`repo-map:<realpath>`). On re-import, all previous entries from that JSON file are deleted in a single transaction and replaced with fresh ones. This is a full-snapshot replacement — the tree-sitter output always represents the complete project state.
-
-#### Validation
-
-- The JSON file must contain an array
-- Each entry must have a `path` field (string)
-- Missing `language` defaults to `"unknown"`, missing `symbols` to `[]`, missing `content` to `""`
-- Invalid JSON or missing file produces a clear error
-
 ## Project Scoping
 
-Defined in `src/tags.ts` and `src/db.ts`.
+Defined in `src/db.ts`.
 
 Memo uses **per-project databases** — each project gets its own `.memo/memo.db` file at the project root. This provides complete isolation: no cross-project vector search contamination, no shared FTS5 indexes, no accidental data leakage between projects.
 
@@ -502,34 +390,6 @@ Git worktrees of the same repository share a single `.memo/memo.db` because `--g
 
 - `/home/user/project` and `/home/user/project-worktree` (both worktrees of the same repo) → both use `/home/user/project/.memo/memo.db`
 - `/home/user/project-a` and `/home/user/project-b` (different repos) → separate databases
-
-### Container Tags
-
-Within each project database, memories are scoped by a `container_tag`. By default, this is the project tag. With `--container <name>`, a named container tag is used instead.
-
-#### Project Tags (default)
-
-```
-tag = "memo_project_" + sha256(gitCommonDir || cwd).slice(0, 16)
-```
-
-This is the default container for all memories added without `--container`. The hash input is the same path used to resolve the project root, ensuring consistency.
-
-#### Named Container Tags
-
-When `--container <name>` is provided:
-
-```
-normalized = trim(name).toLowerCase()
-normalized = normalized.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "")
-tag = "memo_container_" + normalized
-```
-
-Named containers provide sub-scopes within the project DB — useful for imported documentation sets (e.g., `--container react-router`) and ad-hoc memory groups.
-
-### Why Hashes for Project Tags?
-
-Using SHA-256 hashes instead of raw paths prevents leaking filesystem paths in the database tags. The tags are stored alongside every memory and visible in queries, so hashing preserves privacy while maintaining uniqueness.
 
 ## Privacy Filtering
 
@@ -628,7 +488,7 @@ User: memo add "Auth uses JWT with 24h expiry"
   │
   ├─ stripPrivateContent()        Remove <private> blocks
   ├─ isFullyPrivate()             Reject if nothing left
-  ├─ getProjectInfo(cwd)          Compute project tag + metadata
+  ├─ getProjectInfo(cwd)          Compute project tag
   │   └─ git rev-parse            Get git common dir for stable project ID
   ├─ getDbPath(cwd)               Resolve .memo/memo.db path
   ├─ embedText()                  Generate vector embedding
@@ -670,47 +530,16 @@ User: memo search "authentication" --threshold 0.5
       └─ Filter + Limit           Drop below threshold, keep top N
 ```
 
-### Importing a Repo Map
-
-```
-User: memo import --repo-map repo-map.json
-  │
-  ├─ collectRepoMapEntries()       Read + validate JSON file
-  │   ├─ readFileSync()            Load JSON
-  │   ├─ JSON.parse()              Parse array
-  │   ├─ Validate entries          Require "path" field per entry
-  │   └─ sourceKey                 "repo-map:" + realpath of JSON file
-  │
-  ├─ getProjectInfo(cwd)            Compute project tag + metadata
-  │
-  ├─ For each entry:
-  │   ├─ buildRepoMapContent()     "{path} [{lang}] {symbols}\n{content}"
-  │   ├─ embedText(content)        Generate vector (L1 → L2 → ONNX)
-  │   └─ Build MemoryRecord        type="doc_chunk", tags=sourceKey
-  │
-  └─ replaceImportedChunksForSource()  Transactional bulk replace
-      ├─ BEGIN                     Start transaction
-      ├─ DELETE old entries         All doc_chunks with same sourceKey
-      ├─ INSERT new entries         Write to 3 tables per record
-      └─ COMMIT
-```
-
 ### Deleting a Memory
 
 ```
-User: memo forget mem_123 --container my-project
+User: memo forget mem_123
   │
-  ├─ getProjectInfo(cwd)            Compute project tag
-  ├─ Resolve container tag          From --container or project default
-  ├─ getMemoryContainerTag(id)      Look up the memory's container_tag
-  ├─ Verify match                   Error if memory belongs to a different container
-  └─ deleteMemory(id)               Remove from all 3 tables
+  ├─ deleteMemory(id)               Remove from all 3 tables
       ├─ DELETE vec_memories         Vector index
       ├─ DELETE fts_memories         FTS index
       └─ DELETE memories             Main record
 ```
-
-When `--container` is specified, `forget` verifies that the memory belongs to that container before deleting. Without `--container`, any memory in the project DB can be deleted by ID.
 
 ## Design Decisions
 
@@ -766,8 +595,8 @@ SQLite is the only database that provides all three capabilities in a single fil
 
 No server process, no configuration, no network. The WAL journal mode allows concurrent reads from multiple processes (e.g., multiple agent sessions reading memories simultaneously).
 
-### Why worktree-aware project tagging?
+### Why worktree-aware database location?
 
-Developers using `git worktree` maintain multiple checkouts of the same repository in different directories. Without worktree awareness, each checkout would get a different project tag and its own isolated memory scope — memories added in one worktree would be invisible in another.
+Developers using `git worktree` maintain multiple checkouts of the same repository in different directories. Without worktree awareness, each checkout would get its own database — memories added in one worktree would be invisible in another.
 
-By using `git rev-parse --git-common-dir` (which resolves to the shared `.git` directory for all worktrees), memo ensures all worktrees of the same repository share the same project tag and memory pool.
+By using `git rev-parse --git-common-dir` (which resolves to the shared `.git` directory for all worktrees), memo ensures all worktrees of the same repository share the same `.memo/memo.db` database file.

@@ -10,11 +10,6 @@ export interface SearchResult {
   content: string;
   similarity: number;
   createdAt: number;
-  type?: string;
-  metadata?: string;
-  displayName?: string;
-  projectName?: string;
-  gitRepoUrl?: string;
 }
 
 /**
@@ -57,7 +52,6 @@ interface VectorResult {
  */
 export function searchMemories(
   queryVector: Float32Array | null,
-  containerTag: string | null,
   queryText?: string,
   limit?: number,
   threshold?: number,
@@ -101,19 +95,12 @@ export function searchMemories(
 
   if (!skipFullText && queryText && queryText.trim().length > 0) {
     try {
-      const bm25Results = containerTag
-        ? db.query(
-            `SELECT memory_id, rank FROM fts_memories
-             WHERE fts_memories MATCH ? AND container_tag = ?
-             ORDER BY rank
-             LIMIT ?`,
-          ).all(queryText, containerTag, maxResults * 4) as { memory_id: string; rank: number }[]
-        : db.query(
-            `SELECT memory_id, rank FROM fts_memories
-             WHERE fts_memories MATCH ?
-             ORDER BY rank
-             LIMIT ?`,
-          ).all(queryText, maxResults * 4) as { memory_id: string; rank: number }[];
+      const bm25Results = db.query(
+        `SELECT memory_id, rank FROM fts_memories
+         WHERE fts_memories MATCH ?
+         ORDER BY rank
+         LIMIT ?`,
+      ).all(queryText, maxResults * 4) as { memory_id: string; rank: number }[];
 
       bm25Results.forEach((r, index) => {
         bm25Rankings.set(r.memory_id, index);
@@ -140,23 +127,13 @@ export function searchMemories(
   // Fetch memory rows for all candidates
   const ids = Array.from(rrfScores.keys());
   const placeholders = ids.map(() => "?").join(",");
-  let rows: any[];
 
-  if (containerTag) {
-    rows = db
-      .query(
-        `SELECT id, content, type, metadata, created_at, display_name, project_name, git_repo_url
-         FROM memories WHERE id IN (${placeholders}) AND container_tag = ?`,
-      )
-      .all(...ids, containerTag) as any[];
-  } else {
-    rows = db
-      .query(
-        `SELECT id, content, type, metadata, created_at, display_name, project_name, git_repo_url
-         FROM memories WHERE id IN (${placeholders})`,
-      )
-      .all(...ids) as any[];
-  }
+  const rows = db
+    .query(
+      `SELECT id, content, created_at
+       FROM memories WHERE id IN (${placeholders})`,
+    )
+    .all(...ids) as any[];
 
   // Max possible RRF score: rank #0 in both lists = 1/(k+0) + 1/(k+0) = 2/k
   const maxRrfScore = 2 / RRF_K;
@@ -188,11 +165,6 @@ export function searchMemories(
       content: row.content,
       similarity,
       createdAt: row.created_at,
-      type: row.type || undefined,
-      metadata: row.metadata || undefined,
-      displayName: row.display_name,
-      projectName: row.project_name,
-      gitRepoUrl: row.git_repo_url,
     };
   });
 
@@ -204,12 +176,11 @@ export function searchMemories(
 }
 
 /**
- * Find near-duplicates of given text vector within a container.
+ * Find near-duplicates of given text vector.
  * Returns memory IDs with similarity above the dedup threshold.
  */
 export function findNearDuplicates(
   queryVector: Float32Array,
-  containerTag: string,
   threshold: number,
 ): { id: string; similarity: number }[] {
   const db = getDb();
@@ -228,15 +199,7 @@ export function findNearDuplicates(
   for (const r of results) {
     const sim = 1 - r.distance;
     if (sim >= threshold) {
-      // Verify it belongs to the same container
-      const row = db
-        .query(
-          "SELECT id FROM memories WHERE id = ? AND container_tag = ?",
-        )
-        .get(r.memory_id, containerTag) as any;
-      if (row) {
-        candidates.push({ id: r.memory_id, similarity: sim });
-      }
+      candidates.push({ id: r.memory_id, similarity: sim });
     }
   }
 

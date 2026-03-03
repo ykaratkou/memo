@@ -3,31 +3,21 @@
 import {
   insertMemory,
   deleteMemory,
-  getMemoryContainerTag,
   listMemories,
   countMemories,
-  countMemoriesByContainer,
   closeDb,
   resetDb,
   reindexFts,
-  replaceImportedChunksForSource,
 } from "./db.ts";
 import type { MemoryRecord } from "./db.ts";
 import { searchMemories } from "./search.ts";
 import { embeddingService } from "./embed.ts";
 import { checkDuplicate } from "./dedup.ts";
 import { stripPrivateContent, isFullyPrivate } from "./privacy.ts";
-import { getProjectInfo, getNamedContainerInfo } from "./tags.ts";
+import { getProjectInfo } from "./tags.ts";
 import { getDbPath } from "./db.ts";
 import { CONFIG } from "./config.ts";
 import { log } from "./log.ts";
-import {
-  collectImportChunks,
-  collectRepoMapEntries,
-  buildRepoMapContent,
-  DEFAULT_IMPORT_CHUNK_TOKENS,
-  DEFAULT_IMPORT_OVERLAP_TOKENS,
-} from "./importer.ts";
 import { existsSync, symlinkSync, readlinkSync, mkdirSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -37,27 +27,17 @@ const USAGE = `memo - persistent memory for LLM agent sessions
 Data is stored per project in .memo/memo.db (shared across git worktrees).
 
 Commands:
-  memo add <text> [--container N]   Store a memory (scoped to current project)
-  memo import --markdown <path> [--container N]
-                                    Import markdown file/folder into memory
-  memo import --repo-map <file.json> [--container N]
-                                    Import tree-sitter project map (JSON)
-  memo search <query> [--limit N] [--threshold N] [--container N] [--skip-vector] [--skip-full-text]
+  memo add <text>                   Store a memory (scoped to current project)
+  memo search <query> [--limit N] [--threshold N] [--skip-vector] [--skip-full-text]
                                     Hybrid semantic + keyword search (default top ${CONFIG.maxMemories})
-  memo list [--limit N] [--all] [--container N]
-                                    List recent memories (--all for no limit)
-  memo forget <id> [--container N]  Delete a memory by ID
+  memo list [--limit N] [--all]     List recent memories (--all for no limit)
+  memo forget <id>                  Delete a memory by ID
   memo reset                        Reset project memories (irreversible)
   memo reindex                      Rebuild search indexes
   memo status                       Show system status
   memo install skills <target>      Install agent skills (--opencode, --claude, --codex)
 
 Flags:
-  --container <name>                Operate on a named container scope
-  --markdown <path>                 Import markdown file/folder
-  --repo-map <file.json>            Import tree-sitter repo map JSON file
-  --chunk-tokens N                  Markdown chunk size in tokens (default ${DEFAULT_IMPORT_CHUNK_TOKENS})
-  --overlap-tokens N                Markdown chunk overlap in tokens (default ${DEFAULT_IMPORT_OVERLAP_TOKENS})
   --all                             List all memories (no limit)
   --skip-vector                     Search: skip vector (semantic) search
   --skip-full-text                  Search: skip BM25 (keyword) search
@@ -71,11 +51,6 @@ function parseArgs(argv: string[]): {
   limit: number;
   threshold: number | undefined;
   all: boolean;
-  container: string | undefined;
-  chunkTokens: number;
-  overlapTokens: number;
-  markdown: string | undefined;
-  repoMap: string | undefined;
   skipVector: boolean;
   skipFullText: boolean;
   opencode: boolean;
@@ -88,11 +63,6 @@ function parseArgs(argv: string[]): {
   let limit = CONFIG.maxMemories;
   let threshold: number | undefined = undefined;
   let all = false;
-  let container: string | undefined = undefined;
-  let chunkTokens = DEFAULT_IMPORT_CHUNK_TOKENS;
-  let overlapTokens = DEFAULT_IMPORT_OVERLAP_TOKENS;
-  let markdown: string | undefined = undefined;
-  let repoMap: string | undefined = undefined;
   let skipVector = false;
   let skipFullText = false;
   let opencode = false;
@@ -106,31 +76,6 @@ function parseArgs(argv: string[]): {
     if (arg === "--all") {
       all = true;
       i++;
-      continue;
-    }
-    if (arg === "--container" && i + 1 < args.length) {
-      container = args[i + 1];
-      i += 2;
-      continue;
-    }
-    if (arg === "--chunk-tokens" && i + 1 < args.length) {
-      chunkTokens = Number.parseInt(args[i + 1]!, 10);
-      i += 2;
-      continue;
-    }
-    if (arg === "--overlap-tokens" && i + 1 < args.length) {
-      overlapTokens = Number.parseInt(args[i + 1]!, 10);
-      i += 2;
-      continue;
-    }
-    if (arg === "--markdown" && i + 1 < args.length) {
-      markdown = args[i + 1];
-      i += 2;
-      continue;
-    }
-    if (arg === "--repo-map" && i + 1 < args.length) {
-      repoMap = args[i + 1];
-      i += 2;
       continue;
     }
     if (arg === "--skip-vector") {
@@ -190,11 +135,6 @@ function parseArgs(argv: string[]): {
     limit,
     threshold,
     all,
-    container,
-    chunkTokens,
-    overlapTokens,
-    markdown,
-    repoMap,
     skipVector,
     skipFullText,
     opencode,
@@ -203,54 +143,7 @@ function parseArgs(argv: string[]): {
   };
 }
 
-interface ImportedChunkMetadata {
-  sourcePath?: string;
-  sourceKey?: string;
-  startLine?: number;
-  endLine?: number;
-  chunkIndex?: number;
-  chunkCount?: number;
-  language?: string;
-  symbols?: string[];
-  importType?: string;
-}
-
-function resolveNamedContainerInfo(containerName: string): ReturnType<typeof getNamedContainerInfo> {
-  try {
-    return getNamedContainerInfo(containerName);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`Error: ${message}`);
-    process.exit(1);
-  }
-}
-
-function resolveContainerTag(
-  containerName: string | undefined,
-  projectInfo: ReturnType<typeof getProjectInfo>,
-): string {
-  if (containerName !== undefined) return resolveNamedContainerInfo(containerName).tag;
-  return projectInfo.tag;
-}
-
-function parseImportedChunkMetadata(raw: string | undefined): ImportedChunkMetadata | null {
-  if (!raw) return null;
-
-  try {
-    const parsed = JSON.parse(raw) as ImportedChunkMetadata;
-    return typeof parsed === "object" && parsed !== null ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-function formatLineRange(startLine?: number, endLine?: number): string {
-  if (!startLine || !endLine) return "";
-  if (startLine === endLine) return `:${startLine}`;
-  return `:${startLine}-${endLine}`;
-}
-
-async function cmdAdd(text: string, containerName?: string): Promise<void> {
+async function cmdAdd(text: string): Promise<void> {
   if (!text) {
     console.error("Error: no text provided.\n\nUsage: memo add <text>");
     process.exit(1);
@@ -263,15 +156,11 @@ async function cmdAdd(text: string, containerName?: string): Promise<void> {
     process.exit(1);
   }
 
-  const cwd = process.cwd();
-  const projectInfo = getProjectInfo(cwd);
-  const containerTag = resolveContainerTag(containerName, projectInfo);
-
   // Embed the content with symmetric clustering prefix
   const vector = await embeddingService.embedText(sanitized);
 
   // Deduplication check
-  const dedup = checkDuplicate(sanitized, vector, containerTag);
+  const dedup = checkDuplicate(sanitized, vector);
   if (dedup.isDuplicate) {
     console.log(
       `Skipped: ${dedup.reason} (existing: ${dedup.existingId}, similarity: ${dedup.similarity?.toFixed(3)})`,
@@ -286,272 +175,23 @@ async function cmdAdd(text: string, containerName?: string): Promise<void> {
     id,
     content: sanitized,
     vector,
-    containerTag,
     createdAt: now,
-    updatedAt: now,
-    displayName: projectInfo.displayName,
-    userName: projectInfo.userName,
-    userEmail: projectInfo.userEmail,
-    projectPath: projectInfo.projectPath,
-    projectName: projectInfo.projectName,
-    gitRepoUrl: projectInfo.gitRepoUrl,
   };
 
   insertMemory(record);
-  log("Memory added", { id, containerTag });
+  log("Memory added", { id });
   console.log(`Stored: ${id}`);
-}
-
-async function cmdImport(
-  markdownPath: string | undefined,
-  repoMapPath: string | undefined,
-  containerFlag: string | undefined,
-  chunkTokens: number,
-  overlapTokens: number,
-): Promise<void> {
-  if (markdownPath && repoMapPath) {
-    console.error("Error: --markdown and --repo-map cannot be used together.");
-    process.exit(1);
-  }
-
-  if (repoMapPath) {
-    return cmdImportRepoMap(repoMapPath, containerFlag);
-  }
-
-  if (markdownPath) {
-    return cmdImportMarkdown(markdownPath, containerFlag, chunkTokens, overlapTokens);
-  }
-
-  console.error(
-    "Error: import requires --markdown or --repo-map.\n\nUsage:\n  memo import --markdown <path> [--container <name>]\n  memo import --repo-map <file.json> [--container <name>]",
-  );
-  process.exit(1);
-}
-
-async function cmdImportRepoMap(
-  jsonPath: string,
-  containerFlag: string | undefined,
-): Promise<void> {
-  const cwd = process.cwd();
-  const projectInfo = getProjectInfo(cwd);
-  const containerTag = resolveContainerTag(containerFlag, projectInfo);
-
-  const namedContainerInfo = containerFlag
-    ? resolveNamedContainerInfo(containerFlag)
-    : null;
-
-  const containerLabel = namedContainerInfo
-    ? namedContainerInfo.normalizedName
-    : projectInfo.displayName;
-
-  let repoMapResult: ReturnType<typeof collectRepoMapEntries>;
-  try {
-    repoMapResult = collectRepoMapEntries(jsonPath, cwd);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`Error: ${message}`);
-    process.exit(1);
-  }
-
-  if (repoMapResult.entries.length === 0) {
-    console.log("No entries found in repo-map file.");
-    return;
-  }
-
-  const records: MemoryRecord[] = [];
-
-  for (const entry of repoMapResult.entries) {
-    const content = buildRepoMapContent(entry);
-    const now = Date.now();
-    const vector = await embeddingService.embedText(content);
-
-    const metadata = JSON.stringify({
-      sourcePath: entry.path,
-      sourceKey: repoMapResult.sourceKey,
-      language: entry.language,
-      symbols: entry.symbols,
-      importType: "repo-map",
-    });
-
-    records.push({
-      id: `mem_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
-      content,
-      vector,
-      containerTag,
-      tags: repoMapResult.sourceKey,
-      type: "doc_chunk",
-      createdAt: now,
-      updatedAt: now,
-      metadata,
-      displayName: containerLabel,
-      userName: projectInfo.userName,
-      userEmail: projectInfo.userEmail,
-      projectPath: projectInfo.projectPath,
-      projectName: projectInfo.projectName,
-      gitRepoUrl: projectInfo.gitRepoUrl,
-    });
-  }
-
-  const { deleted } = replaceImportedChunksForSource(
-    containerTag,
-    repoMapResult.sourceKey,
-    records,
-  );
-
-  log("Repo-map import complete", {
-    containerTag,
-    containerLabel,
-    sourceKey: repoMapResult.sourceKey,
-    entries: records.length,
-    replaced: deleted,
-  });
-
-  console.log(
-    `Imported ${records.length} file entries from repo-map into container "${containerLabel}".`,
-  );
-  if (deleted > 0) {
-    console.log(`Replaced ${deleted} existing entries from previous repo-map import.`);
-  }
-}
-
-async function cmdImportMarkdown(
-  importPath: string,
-  containerFlag: string | undefined,
-  chunkTokens: number,
-  overlapTokens: number,
-): Promise<void> {
-  if (!Number.isInteger(chunkTokens) || chunkTokens <= 0) {
-    console.error("Error: --chunk-tokens must be a positive integer.");
-    process.exit(1);
-  }
-
-  if (!Number.isInteger(overlapTokens) || overlapTokens < 0) {
-    console.error("Error: --overlap-tokens must be a non-negative integer.");
-    process.exit(1);
-  }
-
-  if (overlapTokens >= chunkTokens) {
-    console.error("Error: --overlap-tokens must be smaller than --chunk-tokens.");
-    process.exit(1);
-  }
-
-  const cwd = process.cwd();
-  const projectInfo = getProjectInfo(cwd);
-  const containerTag = resolveContainerTag(containerFlag, projectInfo);
-
-  const namedContainerInfo = containerFlag
-    ? resolveNamedContainerInfo(containerFlag)
-    : null;
-
-  const containerLabel = namedContainerInfo
-    ? namedContainerInfo.normalizedName
-    : projectInfo.displayName;
-
-  let collected: ReturnType<typeof collectImportChunks>;
-  try {
-    collected = collectImportChunks(importPath, {
-      cwd,
-      chunkTokens,
-      overlapTokens,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    console.error(`Error: ${message}`);
-    process.exit(1);
-  }
-
-  if (collected.files.length === 0) {
-    console.log("No markdown files with importable content found.");
-    return;
-  }
-
-  let fileCount = 0;
-  let insertedTotal = 0;
-  let replacedTotal = 0;
-
-  for (const file of collected.files) {
-    const records: MemoryRecord[] = [];
-
-    for (let i = 0; i < file.chunks.length; i += 1) {
-      const chunk = file.chunks[i];
-      if (!chunk) continue;
-
-      const now = Date.now();
-      const vector = await embeddingService.embedText(chunk.text);
-
-      const metadata = JSON.stringify({
-        sourcePath: file.sourcePath,
-        sourceKey: file.sourceKey,
-        startLine: chunk.startLine,
-        endLine: chunk.endLine,
-        chunkIndex: i + 1,
-        chunkCount: file.chunks.length,
-        chunkHash: chunk.hash,
-      });
-
-      records.push({
-        id: `mem_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
-        content: chunk.text,
-        vector,
-        containerTag,
-        tags: file.sourceKey,
-        type: "doc_chunk",
-        createdAt: now,
-        updatedAt: now,
-        metadata,
-        displayName: containerLabel,
-        userName: projectInfo.userName,
-        userEmail: projectInfo.userEmail,
-        projectPath: projectInfo.projectPath,
-        projectName: projectInfo.projectName,
-        gitRepoUrl: projectInfo.gitRepoUrl,
-      });
-    }
-
-    const { deleted, inserted } = replaceImportedChunksForSource(
-      containerTag,
-      file.sourceKey,
-      records,
-    );
-
-    replacedTotal += deleted;
-    insertedTotal += inserted;
-    fileCount += 1;
-  }
-
-  log("Markdown import complete", {
-    containerTag,
-    containerLabel,
-    inputPath: collected.inputPath,
-    files: fileCount,
-    inserted: insertedTotal,
-    replaced: replacedTotal,
-    skippedEmptyFiles: collected.skippedEmptyFiles,
-    chunkTokens,
-    overlapTokens,
-  });
-
-  console.log(
-    `Imported ${insertedTotal} chunks from ${fileCount} files into container \"${containerLabel}\".`,
-  );
-  if (replacedTotal > 0) {
-    console.log(`Replaced ${replacedTotal} existing chunks from previously imported files.`);
-  }
-  if (collected.skippedEmptyFiles > 0) {
-    console.log(`Skipped ${collected.skippedEmptyFiles} empty markdown files.`);
-  }
 }
 
 async function cmdSearch(
   query: string,
   limit: number,
-  containerName: string | undefined,
   threshold?: number,
   skipVector?: boolean,
   skipFullText?: boolean,
 ): Promise<void> {
   if (!query) {
-    console.error("Error: no query provided.\n\nUsage: memo search <query> [--limit N] [--threshold N] [--container N]");
+    console.error("Error: no query provided.\n\nUsage: memo search <query> [--limit N] [--threshold N]");
     process.exit(1);
   }
 
@@ -560,13 +200,9 @@ async function cmdSearch(
     process.exit(1);
   }
 
-  const cwd = process.cwd();
-  const projectInfo = getProjectInfo(cwd);
-  const containerTag = containerName ? resolveContainerTag(containerName, projectInfo) : null;
-
   // Embed query with symmetric clustering prefix (same as storage)
   const queryVector = skipVector ? null : await embeddingService.embedText(query);
-  const results = searchMemories(queryVector, containerTag, query, limit, threshold, skipFullText);
+  const results = searchMemories(queryVector, query, limit, threshold, skipFullText);
 
   if (results.length === 0) {
     console.log("No memories found.");
@@ -576,27 +212,12 @@ async function cmdSearch(
   for (const r of results) {
     const date = new Date(r.createdAt).toISOString().split("T")[0];
     console.log(`\x1b[94m[${r.similarity.toFixed(3)}] (${r.id}) ${date}\x1b[0m`);
-
-    if (r.type === "doc_chunk") {
-      const metadata = parseImportedChunkMetadata(r.metadata);
-      // Repo-map content already starts with "path [lang] symbols" — no extra line needed.
-      // Markdown chunks need a source attribution line since the content is just text.
-      if (metadata?.sourcePath && metadata.importType !== "repo-map") {
-        const lineRange = formatLineRange(metadata.startLine, metadata.endLine);
-        console.log(`  ${metadata.sourcePath}${lineRange}`);
-      }
-    }
-
     console.log(r.content);
   }
 }
 
-function cmdList(limit: number, all: boolean, containerName?: string): void {
-  const cwd = process.cwd();
-  const projectInfo = getProjectInfo(cwd);
-  const containerTag = containerName ? resolveContainerTag(containerName, projectInfo) : null;
-
-  const rows = listMemories(containerTag, all ? -1 : limit);
+function cmdList(limit: number, all: boolean): void {
+  const rows = listMemories(all ? -1 : limit);
 
   if (rows.length === 0) {
     console.log("No memories stored yet.");
@@ -610,29 +231,10 @@ function cmdList(limit: number, all: boolean, containerName?: string): void {
   }
 }
 
-function cmdForget(id: string, containerName?: string): void {
+function cmdForget(id: string): void {
   if (!id) {
     console.error("Error: no memory ID provided.\n\nUsage: memo forget <id>");
     process.exit(1);
-  }
-
-  const cwd = process.cwd();
-  const projectInfo = getProjectInfo(cwd);
-
-  // If a named container is specified, verify the memory belongs to it
-  if (containerName) {
-    const containerTag = resolveContainerTag(containerName, projectInfo);
-    const memoryTag = getMemoryContainerTag(id);
-    if (!memoryTag) {
-      console.error(`Memory not found: ${id}`);
-      process.exit(1);
-    }
-    if (memoryTag !== containerTag) {
-      console.error(
-        `Error: memory ${id} belongs to a different container. Use the correct --container flag.`,
-      );
-      process.exit(1);
-    }
   }
 
   const deleted = deleteMemory(id);
@@ -673,19 +275,12 @@ function cmdReindex(): void {
   }
 }
 
-function formatContainerLabel(containerTag: string, projectTag: string): string {
-  if (containerTag === projectTag) return "(default)";
-  if (containerTag.startsWith("memo_container_")) return containerTag.slice("memo_container_".length);
-  return containerTag;
-}
-
 function cmdStatus(): void {
   const cwd = process.cwd();
   const projectInfo = getProjectInfo(cwd);
   const dbPath = getDbPath(cwd);
 
   const totalCount = countMemories();
-  const byContainer = countMemoriesByContainer();
 
   console.log("Memo Status:");
   console.log(`  Model:            ${CONFIG.embeddingModel}`);
@@ -696,14 +291,6 @@ function cmdStatus(): void {
   console.log(`  Total memories:   ${totalCount}`);
   console.log(`  Similarity threshold: ${CONFIG.similarityThreshold}`);
   console.log(`  Deduplication:    ${CONFIG.deduplicationEnabled ? "on" : "off"} (threshold: ${CONFIG.deduplicationSimilarityThreshold})`);
-
-  if (byContainer.length > 0) {
-    console.log("\nContainers:");
-    for (const { containerTag, count } of byContainer) {
-      const label = formatContainerLabel(containerTag, projectInfo.tag);
-      console.log(`  ${label}: ${count}`);
-    }
-  }
 }
 
 const INSTALL_USAGE = `Usage: memo install skills --opencode | --claude | --codex
@@ -798,11 +385,6 @@ async function main(): Promise<void> {
     limit,
     threshold,
     all,
-    container,
-    chunkTokens,
-    overlapTokens,
-    markdown,
-    repoMap,
     skipVector,
     skipFullText,
     opencode,
@@ -825,19 +407,16 @@ async function main(): Promise<void> {
   try {
     switch (command) {
       case "add":
-        await cmdAdd(text, container);
-        break;
-      case "import":
-        await cmdImport(markdown, repoMap, container, chunkTokens, overlapTokens);
+        await cmdAdd(text);
         break;
       case "search":
-        await cmdSearch(text, limit, container, threshold, skipVector, skipFullText);
+        await cmdSearch(text, limit, threshold, skipVector, skipFullText);
         break;
       case "list":
-        cmdList(limit, all, container);
+        cmdList(limit, all);
         break;
       case "forget":
-        cmdForget(text, container);
+        cmdForget(text);
         break;
       case "tags":
         cmdTags();

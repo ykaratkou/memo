@@ -126,22 +126,10 @@ function initSchema(db: Database): void {
       id TEXT PRIMARY KEY,
       content TEXT NOT NULL,
       vector BLOB NOT NULL,
-      container_tag TEXT NOT NULL,
-      tags TEXT,
-      type TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      metadata TEXT,
-      display_name TEXT,
-      user_name TEXT,
-      user_email TEXT,
-      project_path TEXT,
-      project_name TEXT,
-      git_repo_url TEXT
+      created_at INTEGER NOT NULL
     )
   `);
 
-  db.run(`CREATE INDEX IF NOT EXISTS idx_container_tag ON memories(container_tag)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_created_at ON memories(created_at DESC)`);
 
   db.run(`
@@ -152,12 +140,11 @@ function initSchema(db: Database): void {
   `);
 
   // FTS5 table for BM25 keyword search
-  // UNINDEXED columns store data without indexing (metadata only)
+  // UNINDEXED columns are stored but not searchable
   db.run(`
     CREATE VIRTUAL TABLE IF NOT EXISTS fts_memories USING fts5(
       content,
       memory_id UNINDEXED,
-      container_tag UNINDEXED,
       tokenize='unicode61'
     )
   `);
@@ -210,18 +197,7 @@ export interface MemoryRecord {
   id: string;
   content: string;
   vector: Float32Array;
-  containerTag: string;
-  tags?: string;
-  type?: string;
   createdAt: number;
-  updatedAt: number;
-  metadata?: string;
-  displayName?: string;
-  userName?: string;
-  userEmail?: string;
-  projectPath?: string;
-  projectName?: string;
-  gitRepoUrl?: string;
 }
 
 export function insertMemory(record: MemoryRecord): void {
@@ -230,29 +206,9 @@ export function insertMemory(record: MemoryRecord): void {
 
   // Insert into main memories table
   db.run(
-    `INSERT INTO memories (
-      id, content, vector, container_tag, tags, type,
-      created_at, updated_at, metadata,
-      display_name, user_name, user_email,
-      project_path, project_name, git_repo_url
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      record.id,
-      record.content,
-      vectorBuffer,
-      record.containerTag,
-      record.tags || null,
-      record.type || null,
-      record.createdAt,
-      record.updatedAt,
-      record.metadata || null,
-      record.displayName || null,
-      record.userName || null,
-      record.userEmail || null,
-      record.projectPath || null,
-      record.projectName || null,
-      record.gitRepoUrl || null,
-    ],
+    `INSERT INTO memories (id, content, vector, created_at)
+     VALUES (?, ?, ?, ?)`,
+    [record.id, record.content, vectorBuffer, record.createdAt],
   );
 
   // Insert into vector search table
@@ -263,74 +219,9 @@ export function insertMemory(record: MemoryRecord): void {
 
   // Insert into FTS5 table for BM25 keyword search
   db.run(
-    `INSERT INTO fts_memories (content, memory_id, container_tag) VALUES (?, ?, ?)`,
-    [record.content, record.id, record.containerTag],
+    `INSERT INTO fts_memories (content, memory_id) VALUES (?, ?)`,
+    [record.content, record.id],
   );
-}
-
-export function replaceImportedChunksForSource(
-  containerTag: string,
-  sourceKey: string,
-  records: MemoryRecord[],
-): { deleted: number; inserted: number } {
-  const db = getDb();
-
-  db.run("BEGIN");
-
-  try {
-    const row = db
-      .query(
-        "SELECT COUNT(*) as count FROM memories WHERE container_tag = ? AND type = 'doc_chunk' AND tags = ?",
-      )
-      .get(containerTag, sourceKey) as { count: number } | null;
-
-    const deleted = Number(row?.count || 0);
-
-    if (deleted > 0) {
-      db.run(
-        `DELETE FROM vec_memories WHERE memory_id IN (
-          SELECT id FROM memories
-          WHERE container_tag = ? AND type = 'doc_chunk' AND tags = ?
-        )`,
-        [containerTag, sourceKey],
-      );
-
-      db.run(
-        `DELETE FROM fts_memories WHERE memory_id IN (
-          SELECT id FROM memories
-          WHERE container_tag = ? AND type = 'doc_chunk' AND tags = ?
-        )`,
-        [containerTag, sourceKey],
-      );
-
-      db.run(
-        "DELETE FROM memories WHERE container_tag = ? AND type = 'doc_chunk' AND tags = ?",
-        [containerTag, sourceKey],
-      );
-    }
-
-    for (const record of records) {
-      insertMemory(record);
-    }
-
-    db.run("COMMIT");
-
-    return {
-      deleted,
-      inserted: records.length,
-    };
-  } catch (error) {
-    db.run("ROLLBACK");
-    throw error;
-  }
-}
-
-export function getMemoryContainerTag(memoryId: string): string | null {
-  const db = getDb();
-  const row = db
-    .query("SELECT container_tag FROM memories WHERE id = ?")
-    .get(memoryId) as { container_tag: string } | null;
-  return row?.container_tag ?? null;
 }
 
 export function deleteMemory(memoryId: string): boolean {
@@ -347,64 +238,35 @@ export function deleteMemory(memoryId: string): boolean {
   return true;
 }
 
-export function listMemories(
-  containerTag: string | null,
-  limit: number,
-): any[] {
+export function listMemories(limit: number): any[] {
   const db = getDb();
 
-  const whereClause = containerTag ? "WHERE container_tag = ?" : "";
   const limitClause = limit >= 0 ? "LIMIT ?" : "";
   const params: any[] = [];
-  if (containerTag) params.push(containerTag);
   if (limit >= 0) params.push(limit);
 
   return db
     .query(
-      `SELECT id, content, type, created_at, updated_at,
-              display_name, project_name, git_repo_url
-       FROM memories ${whereClause}
+      `SELECT id, content, created_at
+       FROM memories
        ORDER BY created_at DESC ${limitClause}`,
     )
     .all(...params) as any[];
 }
 
-export function countMemories(containerTag?: string): number {
+export function countMemories(): number {
   const db = getDb();
-
-  if (containerTag) {
-    const result = db
-      .query("SELECT COUNT(*) as count FROM memories WHERE container_tag = ?")
-      .get(containerTag) as any;
-    return result.count;
-  }
-
   const result = db
     .query("SELECT COUNT(*) as count FROM memories")
     .get() as any;
   return result.count;
 }
 
-export function countMemoriesByContainer(): { containerTag: string; count: number }[] {
-  const db = getDb();
-  const rows = db
-    .query(
-      "SELECT container_tag, COUNT(*) as count FROM memories GROUP BY container_tag ORDER BY count DESC",
-    )
-    .all() as { container_tag: string; count: number }[];
-  return rows.map((row) => ({ containerTag: row.container_tag, count: row.count }));
-}
-
-export function findExactDuplicate(
-  content: string,
-  containerTag: string,
-): string | null {
+export function findExactDuplicate(content: string): string | null {
   const db = getDb();
   const row = db
-    .query(
-      "SELECT id FROM memories WHERE content = ? AND container_tag = ? LIMIT 1",
-    )
-    .get(content, containerTag) as any;
+    .query("SELECT id FROM memories WHERE content = ? LIMIT 1")
+    .get(content) as any;
   return row ? row.id : null;
 }
 
@@ -453,13 +315,13 @@ export function reindexFts(): { added: number; removed: number } {
   // Add missing FTS entries
   const missing = db
     .query(
-      "SELECT id, content, container_tag FROM memories WHERE id NOT IN (SELECT memory_id FROM fts_memories)",
+      "SELECT id, content FROM memories WHERE id NOT IN (SELECT memory_id FROM fts_memories)",
     )
-    .all() as { id: string; content: string; container_tag: string }[];
+    .all() as { id: string; content: string }[];
   for (const row of missing) {
     db.run(
-      "INSERT INTO fts_memories (content, memory_id, container_tag) VALUES (?, ?, ?)",
-      [row.content, row.id, row.container_tag],
+      "INSERT INTO fts_memories (content, memory_id) VALUES (?, ?)",
+      [row.content, row.id],
     );
   }
 

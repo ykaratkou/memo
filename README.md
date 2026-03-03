@@ -21,14 +21,9 @@ memo install skills --codex      # Codex CLI
 ## Commands
 
 ```bash
-memo add <text>                   # store a memory (--container N to target a container)
-memo import --markdown <path>     # import markdown file/folder
-memo import --repo-map <file.json>
-                                  # import tree-sitter project map (JSON)
-memo search <query> [--limit N] [--container NAME]
-                                  # hybrid semantic + keyword search
-memo list [--limit N] [--all] [--container NAME]
-                                  # list recent memories (--all for no limit)
+memo add <text>                   # store a memory
+memo search <query> [--limit N]   # hybrid semantic + keyword search
+memo list [--limit N] [--all]     # list recent memories (--all for no limit)
 memo forget <id>                  # delete by id
 memo reset                        # reset project memories (irreversible)
 memo tags                         # show project info
@@ -47,19 +42,9 @@ memo add "User prefers strict TypeScript"
 # search
 memo search "authentication"
 memo search "coding style" --limit 5
-memo search "router loader" --container react-router
-
-# import docs
-memo import --markdown ./docs
-memo import --markdown ./vendor/react-router/docs --container react-router
-
-# import tree-sitter project map
-memo import --repo-map repo-map.json
-memo import --repo-map repo-map.json --container my-project
 
 # manage
 memo list
-memo list --container react-router
 memo forget mem_1771355620142_y259isiqp
 memo reset
 ```
@@ -104,65 +89,6 @@ Unlike typical search systems that use asymmetric prefixes (`search_query:` vs `
   // "deduplicationEnabled": true,
   // "customSqlitePath": "/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib",
 }
-```
-
-## Markdown Import
-
-`memo import --markdown` chunks markdown files and stores each chunk as searchable memory.
-
-- Supported inputs: single file or directory (recursive)
-- Supported extensions: `.md`, `.markdown`, `.mdx`
-- Default chunking: `--chunk-tokens 400` and `--overlap-tokens 80`
-- Re-import behavior: previously imported chunks from the same file are replaced (sync, not append)
-
-Examples:
-
-```bash
-# import into current project container
-memo import --markdown ./docs
-
-# import into a named container
-memo import --markdown ./docs --container react-router
-
-# search imported docs
-memo search "loader API" --container react-router
-```
-
-## Repo Map Import
-
-`memo import --repo-map` imports a tree-sitter project map — a JSON file describing the codebase structure (files, languages, symbols, code skeletons). This gives LLM agents a way to find relevant files via semantic search instead of grepping the entire project.
-
-Input format (JSON array):
-
-```json
-[
-  {
-    "path": "handlers/users.go",
-    "language": "go",
-    "symbols": ["UserHandler", "HandleUsers", "handle", "list", "create"],
-    "content": "type UserHandler struct {\n\tuserService *services.UserService\n}\n..."
-  }
-]
-```
-
-Each entry is stored as one record. The searchable content combines the file path, language, symbol names, and code skeleton — so queries match on both symbol names (keyword) and code semantics (vector).
-
-- One record per file (no chunking needed — entries are already semantically meaningful units)
-- Re-import replaces all previous entries from the same JSON file
-- Only `path` is required; `language`, `symbols`, and `content` are optional
-
-Examples:
-
-```bash
-# generate with your tree-sitter tool, then import
-treesitter-tool parse ./src > repo-map.json
-memo import --repo-map repo-map.json
-
-# import into a named container
-memo import --repo-map repo-map.json --container my-project
-
-# search for files related to user creation
-memo search "create user" --threshold 0.5
 ```
 
 ## Agent Skills

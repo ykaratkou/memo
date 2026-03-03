@@ -54,11 +54,6 @@ memo add "<memory text>"
 
 After adding, confirm to the user what was stored. If multiple memories were added, list them all.
 
-## Scope
-
-- By default, memories are scoped to the **current project**.
-- Use `--container <name>` to store memories in a specific named container within the current project.
-
 ## Important Notes
 
 - **Keep memories atomic.** One fact per memory. If the user wants to store several things, create several memories.

@@ -16,14 +16,13 @@ export interface DedupResult {
 export function checkDuplicate(
   content: string,
   vector: Float32Array,
-  containerTag: string,
 ): DedupResult {
   if (!CONFIG.deduplicationEnabled) {
     return { isDuplicate: false };
   }
 
   // 1. Exact content match
-  const exactId = findExactDuplicate(content, containerTag);
+  const exactId = findExactDuplicate(content);
   if (exactId) {
     return {
       isDuplicate: true,
@@ -36,7 +35,6 @@ export function checkDuplicate(
   // 2. Near-duplicate via vector similarity
   const nearDups = findNearDuplicates(
     vector,
-    containerTag,
     CONFIG.deduplicationSimilarityThreshold,
   );
 

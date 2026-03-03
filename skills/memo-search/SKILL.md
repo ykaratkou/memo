@@ -21,23 +21,12 @@ Run a hybrid search:
 memo search "<query>" --limit 10
 ```
 
-If the user asks about a named imported knowledge base, scope the query:
-
-```bash
-memo search "<query>" --container <name>
-```
-
 The search combines:
 - **Vector similarity** — finds conceptually related memories (synonyms, related concepts)
 - **BM25 keyword search** — finds exact word matches via full-text search
 - **RRF scoring** — combines both without requiring exact keywords
 
 Adjust `--limit` based on how broad the search is. Use a higher limit for broad topics, lower for specific lookups.
-
-## Scope
-
-- By default, search is scoped to the **current project**.
-- Use `--container <name>` to search a specific named container.
 
 ## Listing All Memories
 

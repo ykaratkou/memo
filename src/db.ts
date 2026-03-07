@@ -126,11 +126,21 @@ function initSchema(db: Database): void {
       id TEXT PRIMARY KEY,
       content TEXT NOT NULL,
       vector BLOB NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      source_key TEXT
     )
   `);
 
   db.run(`CREATE INDEX IF NOT EXISTS idx_created_at ON memories(created_at DESC)`);
+
+  // Migration: add source_key column to existing databases
+  try {
+    db.run("ALTER TABLE memories ADD COLUMN source_key TEXT");
+  } catch {
+    // Column already exists — expected on non-first run
+  }
+
+  db.run(`CREATE INDEX IF NOT EXISTS idx_source_key ON memories(source_key)`);
 
   db.run(`
     CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
@@ -198,6 +208,7 @@ export interface MemoryRecord {
   content: string;
   vector: Float32Array;
   createdAt: number;
+  sourceKey?: string;
 }
 
 export function insertMemory(record: MemoryRecord): void {
@@ -206,9 +217,9 @@ export function insertMemory(record: MemoryRecord): void {
 
   // Insert into main memories table
   db.run(
-    `INSERT INTO memories (id, content, vector, created_at)
-     VALUES (?, ?, ?, ?)`,
-    [record.id, record.content, vectorBuffer, record.createdAt],
+    `INSERT INTO memories (id, content, vector, created_at, source_key)
+     VALUES (?, ?, ?, ?, ?)`,
+    [record.id, record.content, vectorBuffer, record.createdAt, record.sourceKey || null],
   );
 
   // Insert into vector search table
@@ -222,6 +233,56 @@ export function insertMemory(record: MemoryRecord): void {
     `INSERT INTO fts_memories (content, memory_id) VALUES (?, ?)`,
     [record.content, record.id],
   );
+}
+
+/**
+ * Atomically replace all chunks previously imported from a given source.
+ * Deletes old memories with the same source_key, then inserts the new records.
+ */
+export function replaceChunksForSource(
+  sourceKey: string,
+  records: MemoryRecord[],
+): { deleted: number; inserted: number } {
+  const db = getDb();
+
+  db.run("BEGIN");
+
+  try {
+    const row = db
+      .query("SELECT COUNT(*) as count FROM memories WHERE source_key = ?")
+      .get(sourceKey) as { count: number } | null;
+
+    const deleted = Number(row?.count || 0);
+
+    if (deleted > 0) {
+      db.run(
+        `DELETE FROM vec_memories WHERE memory_id IN (
+          SELECT id FROM memories WHERE source_key = ?
+        )`,
+        [sourceKey],
+      );
+
+      db.run(
+        `DELETE FROM fts_memories WHERE memory_id IN (
+          SELECT id FROM memories WHERE source_key = ?
+        )`,
+        [sourceKey],
+      );
+
+      db.run("DELETE FROM memories WHERE source_key = ?", [sourceKey]);
+    }
+
+    for (const record of records) {
+      insertMemory(record);
+    }
+
+    db.run("COMMIT");
+
+    return { deleted, inserted: records.length };
+  } catch (error) {
+    db.run("ROLLBACK");
+    throw error;
+  }
 }
 
 export function deleteMemory(memoryId: string): boolean {

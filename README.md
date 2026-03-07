@@ -22,6 +22,7 @@ memo install skills --codex      # Codex CLI
 
 ```bash
 memo add <text>                   # store a memory
+memo embed <path>                 # embed markdown file/folder into memory
 memo search <query> [--limit N]   # hybrid semantic + keyword search
 memo list [--limit N] [--all]     # list recent memories (--all for no limit)
 memo forget <id>                  # delete by id
@@ -38,6 +39,10 @@ All data is stored **per project** in `.memo/memo.db` (shared across git worktre
 # store
 memo add "Auth uses JWT with 24h expiry"
 memo add "User prefers strict TypeScript"
+
+# embed markdown docs
+memo embed docs/              # embed all .md files in a folder (recursive)
+memo embed README.md          # embed a single file
 
 # search
 memo search "authentication"

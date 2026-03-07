@@ -8,6 +8,7 @@ import {
   closeDb,
   resetDb,
   reindexFts,
+  replaceChunksForSource,
 } from "./db.ts";
 import type { MemoryRecord } from "./db.ts";
 import { searchMemories } from "./search.ts";
@@ -18,6 +19,7 @@ import { getProjectInfo } from "./tags.ts";
 import { getDbPath } from "./db.ts";
 import { CONFIG } from "./config.ts";
 import { log } from "./log.ts";
+import { collectImportChunks } from "./importer.ts";
 import { existsSync, symlinkSync, readlinkSync, mkdirSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -28,6 +30,7 @@ Data is stored per project in .memo/memo.db (shared across git worktrees).
 
 Commands:
   memo add <text>                   Store a memory (scoped to current project)
+  memo embed <path>                 Embed markdown file/folder into memory
   memo search <query> [--limit N] [--threshold N] [--skip-vector] [--skip-full-text]
                                     Hybrid semantic + keyword search (default top ${CONFIG.maxMemories})
   memo list [--limit N] [--all]     List recent memories (--all for no limit)
@@ -181,6 +184,85 @@ async function cmdAdd(text: string): Promise<void> {
   insertMemory(record);
   log("Memory added", { id });
   console.log(`Stored: ${id}`);
+}
+
+async function cmdEmbed(inputPath: string): Promise<void> {
+  if (!inputPath) {
+    console.error("Error: no path provided.\n\nUsage: memo embed <path>");
+    process.exit(1);
+  }
+
+  const cwd = process.cwd();
+
+  let collected: ReturnType<typeof collectImportChunks>;
+  try {
+    collected = collectImportChunks(inputPath, cwd);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`Error: ${message}`);
+    process.exit(1);
+  }
+
+  if (collected.files.length === 0) {
+    console.log("No markdown files with embeddable content found.");
+    return;
+  }
+
+  let fileCount = 0;
+  let insertedTotal = 0;
+  let replacedTotal = 0;
+
+  let chunksDone = 0;
+
+  for (const file of collected.files) {
+    const records: MemoryRecord[] = [];
+
+    for (let i = 0; i < file.chunks.length; i++) {
+      const chunk = file.chunks[i]!;
+      const now = Date.now();
+      // Embed only the chunk text (no header) for cleaner vector similarity
+      const vector = await embeddingService.embedText(chunk.text);
+      // Store with path header so search results show the source location
+      const header = `${i + 1}-${file.sourceKey}:${chunk.startLine}`;
+      const content = `${header}\n${chunk.text}`;
+
+      records.push({
+        id: `mem_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`,
+        content,
+        vector,
+        createdAt: now,
+        sourceKey: file.sourceKey,
+      });
+
+      chunksDone++;
+      process.stdout.write(`\r  Embedding ${chunksDone}/${collected.totalChunks} chunks...`);
+    }
+
+    const { deleted, inserted } = replaceChunksForSource(file.sourceKey, records);
+
+    replacedTotal += deleted;
+    insertedTotal += inserted;
+    fileCount += 1;
+  }
+
+  // Clear the progress line
+  process.stdout.write("\r" + " ".repeat(50) + "\r");
+
+  log("Embed complete", {
+    inputPath: collected.inputPath,
+    files: fileCount,
+    inserted: insertedTotal,
+    replaced: replacedTotal,
+    skippedEmptyFiles: collected.skippedEmptyFiles,
+  });
+
+  console.log(`Embedded ${insertedTotal} chunks from ${fileCount} file(s).`);
+  if (replacedTotal > 0) {
+    console.log(`Replaced ${replacedTotal} existing chunks from previously embedded files.`);
+  }
+  if (collected.skippedEmptyFiles > 0) {
+    console.log(`Skipped ${collected.skippedEmptyFiles} empty markdown file(s).`);
+  }
 }
 
 async function cmdSearch(
@@ -408,6 +490,9 @@ async function main(): Promise<void> {
     switch (command) {
       case "add":
         await cmdAdd(text);
+        break;
+      case "embed":
+        await cmdEmbed(text);
         break;
       case "search":
         await cmdSearch(text, limit, threshold, skipVector, skipFullText);

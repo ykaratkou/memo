@@ -17,6 +17,7 @@ For usage and installation, see [README.md](README.md).
   - [Stage 3: Reciprocal Rank Fusion](#stage-3-reciprocal-rank-fusion)
   - [Stage 4: Score Normalization](#stage-4-score-normalization)
   - [Stage 5: Threshold Filtering](#stage-5-threshold-filtering)
+- [Markdown Embedding](#markdown-embedding)
 - [Deduplication](#deduplication)
 - [Project Scoping](#project-scoping)
 - [Privacy Filtering](#privacy-filtering)
@@ -51,6 +52,7 @@ src/
 ├── db.ts         SQLite schema, CRUD operations, extension loading.
 ├── search.ts     Hybrid search: vector KNN + BM25 + RRF fusion.
 ├── embed.ts      Embedding service. Model loading, inference, LRU cache.
+├── importer.ts   Markdown file discovery, chunking, and collection for embedding.
 ├── dedup.ts      Two-tier deduplication (exact match + cosine similarity).
 ├── tags.ts       Project identity (name, path, git URL).
 ├── privacy.ts    Strip <private> tags before storage.
@@ -67,6 +69,7 @@ cli.ts (entry point)
   ├── db.ts ─────── config.ts, log.ts
   ├── search.ts ─── db.ts, config.ts, log.ts
   ├── dedup.ts ──── db.ts, search.ts, config.ts
+  ├── importer.ts ─ privacy.ts
   ├── privacy.ts    (no dependencies)
   ├── tags.ts       (no dependencies)
   └── log.ts        (no dependencies)
@@ -85,11 +88,15 @@ CREATE TABLE memories (
   id TEXT PRIMARY KEY,           -- "mem_{timestamp}_{random9chars}"
   content TEXT NOT NULL,          -- the memory text
   vector BLOB NOT NULL,           -- Float32Array as raw bytes
-  created_at INTEGER NOT NULL     -- epoch ms
+  created_at INTEGER NOT NULL,    -- epoch ms
+  source_key TEXT                 -- NULL for manual memories; file path for embedded chunks
 );
 
 CREATE INDEX idx_created_at ON memories(created_at DESC);
+CREATE INDEX idx_source_key ON memories(source_key);
 ```
+
+The `source_key` column is `NULL` for memories added via `memo add` and set to the resolved real path of the source file for memories created by `memo embed`. This enables the replace-on-reimport behavior: when the same file is embedded again, all chunks with that `source_key` are atomically deleted and replaced with fresh ones.
 
 ### `vec_memories` — Vector Search (sqlite-vec)
 
@@ -340,6 +347,95 @@ After threshold (0.7): "We use PostgreSQL..." (0.62) is filtered out. Final resu
 1. `[1.000]` "Auth uses JWT tokens with 24h expiry"
 2. `[0.984]` "Login endpoint requires JWT header"
 
+## Markdown Embedding
+
+Defined in `src/importer.ts`. Used by the `memo embed <path>` command.
+
+### Overview
+
+`memo embed` accepts a path to a markdown file or a directory (which is walked recursively for `.md`, `.markdown`, and `.mdx` files). Each file is read, privacy-stripped, chunked into overlapping segments, embedded, and stored. Re-embedding the same path atomically replaces all previously stored chunks for each file.
+
+### Smart Chunking
+
+Instead of cutting at hard token boundaries, the chunker uses a scoring system to find natural markdown break points. This keeps semantic units (sections, paragraphs, code blocks) together. The defaults are **600 tokens per chunk** with **90 tokens of overlap** (15%). Token count is estimated as `characters / 4`.
+
+The algorithm (inspired by [QMD](https://github.com/tobi/qmd)):
+
+1. **Pre-scan** the entire document once for all break points (via regex) and code fence regions
+2. Walk the document targeting ~600 tokens per chunk
+3. When approaching the cut boundary, search a **150-token look-back window** for the best break point
+4. Score each candidate with **squared distance decay**: `finalScore = baseScore × (1 - (distance/window)² × 0.7)`
+5. Cut at the highest-scoring break point; overlap the next chunk by 90 tokens
+
+#### Break Point Scores
+
+| Pattern | Score | Description |
+|---------|-------|-------------|
+| `# Heading` | 100 | H1 — major section |
+| `## Heading` | 90 | H2 — subsection |
+| `### Heading` | 80 | H3 |
+| `#### Heading` | 70 | H4 |
+| `##### Heading` | 60 | H5 |
+| `###### Heading` | 50 | H6 |
+| ` ``` ` | 80 | Code fence boundary |
+| `---` / `***` / `___` | 60 | Horizontal rule |
+| Blank line | 20 | Paragraph boundary |
+| `- item` / `* item` | 5 | Unordered list item |
+| `1. item` | 5 | Ordered list item |
+| Newline | 1 | Minimal break |
+
+#### Distance Decay
+
+The squared decay means a heading far back in the window still beats a plain newline at the exact target, but a closer heading always wins over a farther one of the same level:
+
+```
+At target (distance = 0):     multiplier = 1.0
+At 25% back from target:      multiplier = 0.956
+At 50% back:                  multiplier = 0.825
+At 75% back:                  multiplier = 0.606
+At window edge (100% back):   multiplier = 0.3
+```
+
+For example: an `## H2` heading (score 90) at 50% back scores `90 × 0.825 = 74.3`, which beats a blank line (score 20) at the exact target (`20 × 1.0 = 20`).
+
+#### Code Fence Protection
+
+Break points inside ``` fenced code blocks are skipped entirely. The chunker pairs up fence markers and tracks regions — any candidate break point falling inside a fence is ignored, keeping code blocks intact across chunk boundaries.
+
+### Replace-on-Reimport
+
+Each chunk is stored with a `source_key` set to the file's resolved real path. When `memo embed` is run again on a path that includes previously embedded files, `replaceChunksForSource()` atomically (in a single transaction) deletes all old chunks for that file and inserts the new ones. This means:
+
+- Editing a markdown file and re-running `memo embed` updates all chunks cleanly
+- No duplicate accumulation from repeated embeds
+- Each file's chunks are replaced independently (embedding a directory only replaces chunks for files in that directory)
+
+### Deduplication
+
+Deduplication checks are **skipped** during `memo embed`. The overlapping chunk strategy would cause false positives — adjacent chunks share content by design, and dedup would block their insertion. This is the same approach used for bulk import operations.
+
+### Data Flow
+
+```
+User: memo embed docs/
+  │
+  ├─ collectImportChunks("docs/", cwd)
+  │   ├─ Walk directory               Find .md/.markdown/.mdx files
+  │   ├─ Read each file               readFileSync
+  │   ├─ stripPrivateContent()         Remove <private> blocks
+  │   ├─ chunkMarkdown()              Split into overlapping chunks
+  │   └─ realpathSync()               Resolve source_key per file
+  │
+  └─ For each file:
+      ├─ For each chunk:
+      │   └─ embedText(chunk)          L1 → L2 → ONNX inference
+      └─ replaceChunksForSource()      Atomic replace in DB
+          ├─ BEGIN transaction
+          ├─ DELETE old chunks          By source_key (all 3 tables)
+          ├─ INSERT new chunks          Into all 3 tables
+          └─ COMMIT
+```
+
 ## Deduplication
 
 Defined in `src/dedup.ts`. Runs before every `memo add` to prevent storing redundant memories.
@@ -499,10 +595,27 @@ User: memo add "Auth uses JWT with 24h expiry"
   ├─ checkDuplicate()             Two-tier dedup
   │   ├─ findExactDuplicate()     Exact string match in DB
   │   └─ findNearDuplicates()     Cosine similarity ≥ 0.9
-  └─ insertMemory()               Write to 3 tables
+  └─ insertMemory()               Write to 3 tables (source_key = NULL)
       ├─ INSERT memories           Main record
       ├─ INSERT vec_memories       Vector for KNN
       └─ INSERT fts_memories       Text for BM25
+```
+
+### Embedding Markdown
+
+```
+User: memo embed README.md
+  │
+  ├─ collectImportChunks()          Read file, chunk into segments
+  │   ├─ stripPrivateContent()      Remove <private> blocks
+  │   ├─ chunkMarkdown()            ~400-token chunks, 80-token overlap
+  │   └─ realpathSync()             Resolve source_key
+  │
+  └─ For each file:
+      ├─ embedText(chunk)           For each chunk (L1 → L2 → ONNX)
+      └─ replaceChunksForSource()   Atomic delete old + insert new
+          ├─ DELETE by source_key   From all 3 tables
+          └─ INSERT new chunks      Into all 3 tables (source_key set)
 ```
 
 ### Searching Memories

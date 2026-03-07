@@ -159,6 +159,16 @@ function initSchema(db: Database): void {
     )
   `);
 
+  // Tracks content hash per embedded source file.
+  // Used to skip re-embedding unchanged files.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS embed_sources (
+      source_key TEXT PRIMARY KEY,
+      content_hash TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `);
+
   // Persistent embedding cache — keyed by content hash + model.
   // Survives process restarts, avoids re-running ONNX inference for
   // previously seen text. Invalidated naturally on model change.
@@ -283,6 +293,28 @@ export function replaceChunksForSource(
     db.run("ROLLBACK");
     throw error;
   }
+}
+
+export function getSourceHash(sourceKey: string): string | null {
+  const db = getDb();
+  const row = db
+    .query("SELECT content_hash FROM embed_sources WHERE source_key = ?")
+    .get(sourceKey) as { content_hash: string } | null;
+  return row?.content_hash ?? null;
+}
+
+export function setSourceHash(sourceKey: string, contentHash: string): void {
+  const db = getDb();
+  db.run(
+    `INSERT OR REPLACE INTO embed_sources (source_key, content_hash, updated_at)
+     VALUES (?, ?, ?)`,
+    [sourceKey, contentHash, Date.now()],
+  );
+}
+
+export function deleteSourceHash(sourceKey: string): void {
+  const db = getDb();
+  db.run("DELETE FROM embed_sources WHERE source_key = ?", [sourceKey]);
 }
 
 export function deleteMemory(memoryId: string): boolean {

@@ -9,6 +9,8 @@ import {
   resetDb,
   reindexFts,
   replaceChunksForSource,
+  getSourceHash,
+  setSourceHash,
 } from "./db.ts";
 import type { MemoryRecord } from "./db.ts";
 import { searchMemories } from "./search.ts";
@@ -209,12 +211,24 @@ async function cmdEmbed(inputPath: string): Promise<void> {
   }
 
   let fileCount = 0;
+  let skippedUnchanged = 0;
   let insertedTotal = 0;
   let replacedTotal = 0;
 
+  // Filter out unchanged files before counting chunks to embed
+  const filesToEmbed = collected.files.filter((file) => {
+    const storedHash = getSourceHash(file.sourceKey);
+    if (storedHash === file.contentHash) {
+      skippedUnchanged++;
+      return false;
+    }
+    return true;
+  });
+
+  const totalChunks = filesToEmbed.reduce((sum, f) => sum + f.chunks.length, 0);
   let chunksDone = 0;
 
-  for (const file of collected.files) {
+  for (const file of filesToEmbed) {
     const records: MemoryRecord[] = [];
 
     for (let i = 0; i < file.chunks.length; i++) {
@@ -235,10 +249,11 @@ async function cmdEmbed(inputPath: string): Promise<void> {
       });
 
       chunksDone++;
-      process.stdout.write(`\r  Embedding ${chunksDone}/${collected.totalChunks} chunks...`);
+      process.stdout.write(`\r  Embedding ${chunksDone}/${totalChunks} chunks...`);
     }
 
     const { deleted, inserted } = replaceChunksForSource(file.sourceKey, records);
+    setSourceHash(file.sourceKey, file.contentHash);
 
     replacedTotal += deleted;
     insertedTotal += inserted;
@@ -246,22 +261,33 @@ async function cmdEmbed(inputPath: string): Promise<void> {
   }
 
   // Clear the progress line
-  process.stdout.write("\r" + " ".repeat(50) + "\r");
+  if (totalChunks > 0) {
+    process.stdout.write("\r" + " ".repeat(50) + "\r");
+  }
 
   log("Embed complete", {
     inputPath: collected.inputPath,
     files: fileCount,
     inserted: insertedTotal,
     replaced: replacedTotal,
+    skippedUnchanged,
     skippedEmptyFiles: collected.skippedEmptyFiles,
   });
 
-  console.log(`Embedded ${insertedTotal} chunks from ${fileCount} file(s).`);
+  if (fileCount > 0) {
+    console.log(`Embedded ${insertedTotal} chunks from ${fileCount} file(s).`);
+  }
   if (replacedTotal > 0) {
     console.log(`Replaced ${replacedTotal} existing chunks from previously embedded files.`);
   }
+  if (skippedUnchanged > 0) {
+    console.log(`Skipped ${skippedUnchanged} unchanged file(s).`);
+  }
   if (collected.skippedEmptyFiles > 0) {
     console.log(`Skipped ${collected.skippedEmptyFiles} empty markdown file(s).`);
+  }
+  if (fileCount === 0 && skippedUnchanged > 0) {
+    console.log("All files up to date.");
   }
 }
 

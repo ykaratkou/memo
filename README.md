@@ -22,7 +22,7 @@ memo install skills --codex      # Codex CLI
 
 ```bash
 memo add <text>                   # store a memory
-memo embed <path>                 # embed markdown file/folder into memory
+memo embed <path>                 # embed markdown file/folder (skips unchanged)
 memo search <query> [--limit N]   # hybrid semantic + keyword search
 memo list [--limit N] [--all]     # list recent memories (--all for no limit)
 memo forget <id>                  # delete by id

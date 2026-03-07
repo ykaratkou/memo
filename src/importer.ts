@@ -26,6 +26,7 @@ export interface ImportChunk {
 export interface ImportFile {
   sourceKey: string;
   sourcePath: string;
+  contentHash: string;
   chunks: ImportChunk[];
 }
 
@@ -335,6 +336,7 @@ export function collectImportChunks(inputPath: string, cwd: string): ImportResul
     files.push({
       sourceKey: normalizePath(sourceKey),
       sourcePath,
+      contentHash: hashText(sanitized),
       chunks,
     });
   }

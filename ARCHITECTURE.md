@@ -77,7 +77,7 @@ cli.ts (entry point)
 
 ## Database Schema
 
-The database lives at `<project-root>/.memo/memo.db` — one database per project, shared across git worktrees of the same repository. It uses WAL journal mode for concurrent read performance. Three tables are kept in sync for every insert and delete, plus one cache table for embeddings:
+The database lives at `<project-root>/.memo/memo.db` — one database per project, shared across git worktrees of the same repository. It uses WAL journal mode for concurrent read performance. Three tables are kept in sync for every insert and delete, plus cache and tracking tables:
 
 ### `memories` — Main Table
 
@@ -142,6 +142,20 @@ CREATE TABLE embedding_cache (
 The composite primary key `(content_hash, model)` ensures that switching embedding models naturally invalidates the cache — vectors from the old model won't be returned for queries using the new model.
 
 This table is not cleaned up by `memo forget`. It is dropped along with everything else on `memo reset`. No eviction policy is needed — each entry is ~3KB (768 × 4 bytes embedding + metadata), so even 10,000 entries occupy only ~30MB.
+
+### `embed_sources` — Embed Change Tracking
+
+Tracks the content hash of each embedded source file to skip re-embedding unchanged files.
+
+```sql
+CREATE TABLE embed_sources (
+  source_key TEXT PRIMARY KEY,    -- resolved real path of the source file
+  content_hash TEXT NOT NULL,     -- SHA-256 of the sanitized file content
+  updated_at INTEGER NOT NULL     -- epoch ms of last embed
+);
+```
+
+When `memo embed` runs, each file's content is hashed after privacy stripping. If the hash matches the stored value for that `source_key`, the file is skipped entirely — no embedding, no DB writes. The hash is updated after a successful replace. Dropped along with everything else on `memo reset`.
 
 ### SQLite Pragmas
 
@@ -353,7 +367,7 @@ Defined in `src/importer.ts`. Used by the `memo embed <path>` command.
 
 ### Overview
 
-`memo embed` accepts a path to a markdown file or a directory (which is walked recursively for `.md`, `.markdown`, and `.mdx` files). Each file is read, privacy-stripped, chunked into overlapping segments, embedded, and stored. Re-embedding the same path atomically replaces all previously stored chunks for each file.
+`memo embed` accepts a path to a markdown file or a directory (which is walked recursively for `.md`, `.markdown`, and `.mdx` files). Each file is read, privacy-stripped, and hashed. Unchanged files (hash matches the stored value in `embed_sources`) are skipped entirely. Changed files are chunked into overlapping segments, embedded, and stored. Re-embedding the same path atomically replaces all previously stored chunks for each file.
 
 ### Smart Chunking
 
@@ -402,6 +416,12 @@ For example: an `## H2` heading (score 90) at 50% back scores `90 × 0.825 = 74.
 
 Break points inside ``` fenced code blocks are skipped entirely. The chunker pairs up fence markers and tracks regions — any candidate break point falling inside a fence is ignored, keeping code blocks intact across chunk boundaries.
 
+### Change Detection
+
+Before embedding, each file's sanitized content is SHA-256 hashed and compared against the stored hash in the `embed_sources` table. If the hash matches, the file is skipped — no chunks are generated, no vectors are computed, no DB writes happen. This makes re-running `memo embed` on an unchanged directory essentially a no-op (just file reads + hash comparisons).
+
+The hash is stored after a successful embed. If a file changes, the hash won't match and the file goes through the full embed + replace cycle.
+
 ### Replace-on-Reimport
 
 Each chunk is stored with a `source_key` set to the file's resolved real path. When `memo embed` is run again on a path that includes previously embedded files, `replaceChunksForSource()` atomically (in a single transaction) deletes all old chunks for that file and inserts the new ones. This means:
@@ -423,17 +443,21 @@ User: memo embed docs/
   │   ├─ Walk directory               Find .md/.markdown/.mdx files
   │   ├─ Read each file               readFileSync
   │   ├─ stripPrivateContent()         Remove <private> blocks
-  │   ├─ chunkMarkdown()              Split into overlapping chunks
+  │   ├─ SHA-256 hash sanitized content
+  │   ├─ chunkMarkdown()              Smart markdown-aware chunking
   │   └─ realpathSync()               Resolve source_key per file
   │
   └─ For each file:
+      ├─ getSourceHash(source_key)     Check embed_sources table
+      │   └─ Hash matches?             → skip file (unchanged)
       ├─ For each chunk:
       │   └─ embedText(chunk)          L1 → L2 → ONNX inference
-      └─ replaceChunksForSource()      Atomic replace in DB
-          ├─ BEGIN transaction
-          ├─ DELETE old chunks          By source_key (all 3 tables)
-          ├─ INSERT new chunks          Into all 3 tables
-          └─ COMMIT
+      ├─ replaceChunksForSource()      Atomic replace in DB
+      │   ├─ BEGIN transaction
+      │   ├─ DELETE old chunks          By source_key (all 3 tables)
+      │   ├─ INSERT new chunks          Into all 3 tables
+      │   └─ COMMIT
+      └─ setSourceHash()               Store new hash for next run
 ```
 
 ## Deduplication
@@ -608,14 +632,17 @@ User: memo embed README.md
   │
   ├─ collectImportChunks()          Read file, chunk into segments
   │   ├─ stripPrivateContent()      Remove <private> blocks
-  │   ├─ chunkMarkdown()            ~400-token chunks, 80-token overlap
+  │   ├─ SHA-256 hash content       For change detection
+  │   ├─ chunkMarkdown()            ~600-token smart chunks, 90-token overlap
   │   └─ realpathSync()             Resolve source_key
   │
   └─ For each file:
+      ├─ getSourceHash()            Unchanged? → skip
       ├─ embedText(chunk)           For each chunk (L1 → L2 → ONNX)
-      └─ replaceChunksForSource()   Atomic delete old + insert new
-          ├─ DELETE by source_key   From all 3 tables
-          └─ INSERT new chunks      Into all 3 tables (source_key set)
+      ├─ replaceChunksForSource()   Atomic delete old + insert new
+      │   ├─ DELETE by source_key   From all 3 tables
+      │   └─ INSERT new chunks      Into all 3 tables (source_key set)
+      └─ setSourceHash()            Store hash for next run
 ```
 
 ### Searching Memories

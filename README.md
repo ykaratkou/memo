@@ -22,7 +22,7 @@ memo install skills --codex      # Codex CLI
 
 ```bash
 memo add <text>                   # store a memory
-memo embed <path>                 # embed markdown file/folder (skips unchanged)
+memo embed <path>                 # embed markdown file/folder (skips unchanged, cleans up deleted)
 memo search <query> [--limit N]   # hybrid semantic + keyword search
 memo list [--limit N] [--all]     # list recent memories (--all for no limit)
 memo forget <id>                  # delete by id
@@ -137,7 +137,15 @@ bun ./src/cli.ts list
 bun run memo add "test memory"
 ```
 
-### Testing changes
+### Running tests
+
+```bash
+bun test
+```
+
+107 tests covering all modules: privacy, JSONC parsing, markdown chunking, database CRUD, hybrid search, deduplication, stale embed cleanup, configuration, and more.
+
+### Manual testing
 
 ```bash
 # Reset database for clean testing

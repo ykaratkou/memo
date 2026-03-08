@@ -7,7 +7,8 @@
     "memo": "src/cli.ts"
   },
   "scripts": {
-    "memo": "bun src/cli.ts"
+    "memo": "bun src/cli.ts",
+    "test": "bun test"
   },
   "devDependencies": {
     "@types/bun": "latest"

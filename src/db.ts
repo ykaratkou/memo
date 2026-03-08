@@ -442,3 +442,12 @@ export function resetDb(): void {
     }
   }
 }
+
+/**
+ * Reset internal singleton state so the next getDb() call re-initializes.
+ * Intended for test isolation only — do not use in production code.
+ */
+export function _resetForTesting(): void {
+  closeDb();
+  _dbPath = null;
+}

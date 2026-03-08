@@ -57,7 +57,8 @@ src/
 ├── tags.ts       Project identity (name, path, git URL).
 ├── privacy.ts    Strip <private> tags before storage.
 ├── log.ts        Append-only file logger with 5MB rotation.
-└── jsonc.ts      JSONC comment stripper (state machine parser).
+├── jsonc.ts      JSONC comment stripper (state machine parser).
+└── *.test.ts     Co-located tests (bun test).
 ```
 
 ### File Dependency Graph
@@ -369,6 +370,8 @@ Defined in `src/importer.ts`. Used by the `memo embed <path>` command.
 
 `memo embed` accepts a path to a markdown file or a directory (which is walked recursively for `.md`, `.markdown`, and `.mdx` files). Each file is read, privacy-stripped, and hashed. Unchanged files (hash matches the stored value in `embed_sources`) are skipped entirely. Changed files are chunked into overlapping segments, embedded, and stored. Re-embedding the same path atomically replaces all previously stored chunks for each file.
 
+When embedding a directory, files that were previously embedded but no longer exist on disk are automatically cleaned up — their chunks are deleted from all three tables and their `embed_sources` tracking entries are removed.
+
 ### Smart Chunking
 
 Instead of cutting at hard token boundaries, the chunker uses a scoring system to find natural markdown break points. This keeps semantic units (sections, paragraphs, code blocks) together. The defaults are **600 tokens per chunk** with **90 tokens of overlap** (15%). Token count is estimated as `characters / 4`.
@@ -430,6 +433,16 @@ Each chunk is stored with a `source_key` set to the file's resolved real path. W
 - No duplicate accumulation from repeated embeds
 - Each file's chunks are replaced independently (embedding a directory only replaces chunks for files in that directory)
 
+### Stale File Cleanup
+
+When embedding a directory, memo also detects and removes embeddings for files that no longer exist on disk. The cleanup logic:
+
+1. Queries `embed_sources` for all `source_key` values matching the directory prefix (using `LIKE prefix%` with a trailing `/` to avoid matching similar-named directories)
+2. Builds a `Set` of source keys from files currently discovered on disk
+3. For each DB key not in the current set: deletes all chunks via `replaceChunksForSource(key, [])` and removes the tracking entry via `deleteSourceHash(key)`
+
+This only runs for directory embeds — single file embeds have no concept of "missing siblings." Files that become empty (0 chunks after chunking) are treated as stale and their old embeddings are removed.
+
 ### Deduplication
 
 Deduplication checks are **skipped** during `memo embed`. The overlapping chunk strategy would cause false positives — adjacent chunks share content by design, and dedup would block their insertion. This is the same approach used for bulk import operations.
@@ -446,6 +459,13 @@ User: memo embed docs/
   │   ├─ SHA-256 hash sanitized content
   │   ├─ chunkMarkdown()              Smart markdown-aware chunking
   │   └─ realpathSync()               Resolve source_key per file
+  │
+  ├─ Stale cleanup (directories only)
+  │   ├─ getSourceKeysWithPrefix()     Find all previously embedded keys under folder
+  │   ├─ Compare with current files    Build set of current source keys
+  │   └─ For each stale key:
+  │       ├─ replaceChunksForSource(key, [])  Delete chunks from all 3 tables
+  │       └─ deleteSourceHash(key)            Remove tracking entry
   │
   └─ For each file:
       ├─ getSourceHash(source_key)     Check embed_sources table
@@ -628,13 +648,17 @@ User: memo add "Auth uses JWT with 24h expiry"
 ### Embedding Markdown
 
 ```
-User: memo embed README.md
+User: memo embed docs/
   │
-  ├─ collectImportChunks()          Read file, chunk into segments
+  ├─ collectImportChunks()          Read files, chunk into segments
   │   ├─ stripPrivateContent()      Remove <private> blocks
   │   ├─ SHA-256 hash content       For change detection
   │   ├─ chunkMarkdown()            ~600-token smart chunks, 90-token overlap
   │   └─ realpathSync()             Resolve source_key
+  │
+  ├─ Stale cleanup (dirs only)      Remove embeddings for deleted files
+  │   ├─ getSourceKeysWithPrefix()  Find all previously embedded keys
+  │   └─ Delete stale keys          replaceChunksForSource(key, []) + deleteSourceHash
   │
   └─ For each file:
       ├─ getSourceHash()            Unchanged? → skip
@@ -680,6 +704,29 @@ User: memo forget mem_123
       ├─ DELETE fts_memories         FTS index
       └─ DELETE memories             Main record
 ```
+
+## Testing
+
+Tests use Bun's built-in test runner (`bun test`). Test files are co-located with source files (`src/*.test.ts`).
+
+```
+src/
+├── privacy.test.ts       stripPrivateContent, isFullyPrivate
+├── jsonc.test.ts         JSONC comment stripping, trailing commas
+├── importer.test.ts      Markdown chunking, file collection, privacy stripping
+├── db.test.ts            CRUD, replaceChunksForSource, source hash tracking, getSourceKeysWithPrefix
+├── search.test.ts        Vector search, BM25 search, hybrid search, findNearDuplicates
+├── dedup.test.ts         Exact and near-duplicate detection
+├── embed-stale.test.ts   Stale embed cleanup integration (simulates cmdEmbed's cleanup flow)
+├── tags.test.ts          Project identity, deterministic tags
+├── config.test.ts        Configuration defaults and types
+├── embed.test.ts         EmbeddingService singleton and cache
+└── log.test.ts           File logger smoke tests
+```
+
+DB-dependent tests use the project's own database with careful cleanup (insert before, delete after). The `_resetForTesting()` export in `db.ts` clears the internal singleton state for test isolation.
+
+Embedding tests avoid loading the ONNX model (~130MB) by using pre-computed vectors. The stale embed cleanup tests simulate `cmdEmbed`'s cleanup logic at the DB layer.
 
 ## Design Decisions
 

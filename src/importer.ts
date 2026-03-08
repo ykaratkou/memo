@@ -5,8 +5,8 @@ import { stripPrivateContent } from "./privacy.ts";
 
 // ── Chunking constants ──────────────────────────────────────────
 
-export const DEFAULT_CHUNK_TOKENS = 600;
-export const DEFAULT_OVERLAP_TOKENS = 90; // 15% of chunk size
+const DEFAULT_CHUNK_TOKENS = 600;
+const DEFAULT_OVERLAP_TOKENS = 90; // 15% of chunk size
 const WINDOW_TOKENS = 150; // ~25% look-back window for finding break points
 
 // Character estimates (~4 chars per token)

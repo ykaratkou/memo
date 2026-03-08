@@ -11,6 +11,8 @@ import {
   replaceChunksForSource,
   getSourceHash,
   setSourceHash,
+  deleteSourceHash,
+  getSourceKeysWithPrefix,
 } from "./db.ts";
 import type { MemoryRecord } from "./db.ts";
 import { searchMemories } from "./search.ts";
@@ -22,7 +24,7 @@ import { getDbPath } from "./db.ts";
 import { CONFIG } from "./config.ts";
 import { log } from "./log.ts";
 import { collectImportChunks } from "./importer.ts";
-import { existsSync, symlinkSync, readlinkSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, symlinkSync, readlinkSync, mkdirSync, readdirSync, lstatSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 
@@ -205,7 +207,30 @@ async function cmdEmbed(inputPath: string): Promise<void> {
     process.exit(1);
   }
 
-  if (collected.files.length === 0) {
+  // Clean up embeddings for files that no longer exist in a directory.
+  // Only applies when embedding a directory (not a single file).
+  let removedStaleFiles = 0;
+  let removedStaleChunks = 0;
+
+  const isDirectory = lstatSync(collected.inputPath).isDirectory();
+  if (isDirectory) {
+    const folderPrefix = collected.inputPath.endsWith("/")
+      ? collected.inputPath
+      : collected.inputPath + "/";
+    const dbSourceKeys = getSourceKeysWithPrefix(folderPrefix);
+    const currentSourceKeys = new Set(collected.files.map((f) => f.sourceKey));
+
+    for (const staleKey of dbSourceKeys) {
+      if (!currentSourceKeys.has(staleKey)) {
+        const { deleted } = replaceChunksForSource(staleKey, []);
+        deleteSourceHash(staleKey);
+        removedStaleChunks += deleted;
+        removedStaleFiles += 1;
+      }
+    }
+  }
+
+  if (collected.files.length === 0 && removedStaleFiles === 0) {
     console.log("No markdown files with embeddable content found.");
     return;
   }
@@ -272,6 +297,8 @@ async function cmdEmbed(inputPath: string): Promise<void> {
     replaced: replacedTotal,
     skippedUnchanged,
     skippedEmptyFiles: collected.skippedEmptyFiles,
+    removedStaleFiles,
+    removedStaleChunks,
   });
 
   if (fileCount > 0) {
@@ -280,13 +307,18 @@ async function cmdEmbed(inputPath: string): Promise<void> {
   if (replacedTotal > 0) {
     console.log(`Replaced ${replacedTotal} existing chunks from previously embedded files.`);
   }
+  if (removedStaleFiles > 0) {
+    console.log(
+      `Removed ${removedStaleChunks} chunk(s) from ${removedStaleFiles} file(s) no longer in source folder.`,
+    );
+  }
   if (skippedUnchanged > 0) {
     console.log(`Skipped ${skippedUnchanged} unchanged file(s).`);
   }
   if (collected.skippedEmptyFiles > 0) {
     console.log(`Skipped ${collected.skippedEmptyFiles} empty markdown file(s).`);
   }
-  if (fileCount === 0 && skippedUnchanged > 0) {
+  if (fileCount === 0 && removedStaleFiles === 0 && skippedUnchanged > 0) {
     console.log("All files up to date.");
   }
 }

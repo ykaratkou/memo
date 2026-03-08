@@ -317,6 +317,14 @@ export function deleteSourceHash(sourceKey: string): void {
   db.run("DELETE FROM embed_sources WHERE source_key = ?", [sourceKey]);
 }
 
+export function getSourceKeysWithPrefix(prefix: string): string[] {
+  const db = getDb();
+  const rows = db
+    .query("SELECT source_key FROM embed_sources WHERE source_key LIKE ?")
+    .all(prefix + "%") as { source_key: string }[];
+  return rows.map((r) => r.source_key);
+}
+
 export function deleteMemory(memoryId: string): boolean {
   const db = getDb();
   const existing = db
